@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -350,21 +352,27 @@ func Load() (Config, error) {
 	cfg.AvailableSandboxProviders = available
 	// Validate every provider this control plane offers, not just the default,
 	// so a CP configured with both providers fails fast when either is
-	// misconfigured rather than at the first session that selects it.
+	// misconfigured rather than at the first session that selects it. Hosted
+	// environments (staging/production) keep that fail-fast behavior: a
+	// misconfigured hosted provider must never come up quietly. Local/dev
+	// environments instead drop an unconfigured provider (e.g. Coder or
+	// NodeOps credentials left blank because only Docker is set up locally)
+	// and fall back to the remaining providers, so a developer without
+	// Coder/NodeOps access can still boot the control plane against Docker.
+	validated := make([]string, 0, len(cfg.AvailableSandboxProviders))
 	for _, provider := range cfg.AvailableSandboxProviders {
+		var err error
 		switch provider {
 		case "docker":
-			if err := (sandbox.DockerConfig{
+			err = (sandbox.DockerConfig{
 				Host:           cfg.DockerHost,
 				WorkerImage:    cfg.DockerWorkerImage,
 				Network:        cfg.DockerNetwork,
 				Namespace:      cfg.DockerNamespace,
 				WorkerTokenTTL: cfg.DockerWorkerTokenTTL,
-			}).Validate(); err != nil {
-				return Config{}, err
-			}
+			}).Validate()
 		case "nodeops":
-			if err := (sandbox.NodeOpsConfig{
+			err = (sandbox.NodeOpsConfig{
 				BaseURL:          cfg.NodeOpsBaseURL,
 				APIKey:           cfg.NodeOpsAPIKey,
 				DefaultShape:     cfg.NodeOpsDefaultShape,
@@ -374,11 +382,9 @@ func Load() (Config, error) {
 				SSHKeyPath:       cfg.NodeOpsSSHKeyPath,
 				WorkerTokenTTL:   cfg.NodeOpsWorkerTokenTTL,
 				AutoPauseSeconds: cfg.NodeOpsAutoPauseSeconds,
-			}).Validate(); err != nil {
-				return Config{}, err
-			}
+			}).Validate()
 		case "coder":
-			if err := (sandbox.CoderConfig{
+			err = (sandbox.CoderConfig{
 				BaseURL:        cfg.CoderURL,
 				Owner:          cfg.CoderOwner,
 				TemplateID:     cfg.CoderTemplateID,
@@ -386,16 +392,35 @@ func Load() (Config, error) {
 				Parameters:     cfg.CoderParameters,
 				DurableRoot:    cfg.CoderDurableRoot,
 				WorkerTokenTTL: cfg.CoderWorkerTokenTTL,
-			}).Validate(); err != nil {
+			}).Validate()
+			if err == nil && cfg.CoderAPIToken == "" {
+				err = errors.New("AO_CLOUD_CODER_TOKEN is required")
+			}
+			if err == nil {
+				coderURL, _ := url.Parse(cfg.CoderURL)
+				if cfg.Hosted() && coderURL.Scheme != "https" {
+					err = errors.New("AO_CLOUD_CODER_URL must use HTTPS in hosted environments")
+				}
+			}
+		}
+		if err != nil {
+			if cfg.Hosted() {
 				return Config{}, err
 			}
-			if cfg.CoderAPIToken == "" {
-				return Config{}, errors.New("AO_CLOUD_CODER_TOKEN is required")
-			}
-			coderURL, _ := url.Parse(cfg.CoderURL)
-			if cfg.Hosted() && coderURL.Scheme != "https" {
-				return Config{}, errors.New("AO_CLOUD_CODER_URL must use HTTPS in hosted environments")
-			}
+			log.Printf("ao-cloud: sandbox provider %q is unconfigured locally (%v); continuing without it", provider, err)
+			continue
+		}
+		validated = append(validated, provider)
+	}
+	cfg.AvailableSandboxProviders = validated
+	if len(cfg.AvailableSandboxProviders) == 0 {
+		return Config{}, errors.New("no configured sandbox provider is available")
+	}
+	if !slices.Contains(cfg.AvailableSandboxProviders, cfg.SandboxProvider) {
+		if slices.Contains(cfg.AvailableSandboxProviders, "docker") {
+			cfg.SandboxProvider = "docker"
+		} else {
+			cfg.SandboxProvider = cfg.AvailableSandboxProviders[0]
 		}
 	}
 	if providersRequireWorkerHome(cfg.AvailableSandboxProviders) {
