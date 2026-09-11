@@ -30,6 +30,11 @@ const (
 	// tickets but never opening a WebSocket would otherwise keep a sandbox
 	// awake — and billed — indefinitely.
 	unconsumedTicketThreshold = 10
+	// interactionRefreshThrottle bounds how often active terminal input rewrites
+	// the interactive lease. Within one lease window the lease is refreshed at
+	// most once per (interactiveSessionLease - interactionRefreshThrottle), so a
+	// fast typist does not rewrite ao_sandboxes on every keystroke.
+	interactionRefreshThrottle = 30 * time.Second
 )
 
 func (s *Store) CreateWorkspaceRequest(
@@ -753,6 +758,37 @@ func (s *Store) queueTerminalRequest(
 	payload []byte,
 ) error {
 	return s.withOrg(ctx, terminal.OrgID, func(tx pgx.Tx) error {
+		// Typing or resizing a terminal is active proof of life for BOTH terminal
+		// surfaces (workspace and agent): keep an in-use sandbox awake, and wake a
+		// paused one so the keystroke that arrives after an idle pause resumes the
+		// box instead of being silently dropped. Idle-but-open output streams never
+		// reach here, so they still pause normally. The lease rewrite is throttled
+		// so a fast typist does not rewrite ao_sandboxes on every keystroke. This
+		// mirrors the wake in IssueTerminalTicket for the in-session case where the
+		// box paused underneath an already-open terminal.
+		if kind == "terminal.input" || kind == "terminal.resize" {
+			if _, err := tx.Exec(ctx,
+				`UPDATE ao_sandboxes
+				SET desired_state = CASE WHEN desired_state = 'paused' THEN 'running' ELSE desired_state END,
+					reconcile_after = CASE WHEN desired_state = 'paused' THEN now() ELSE reconcile_after END,
+					startup_started_at = CASE WHEN desired_state = 'paused' THEN now() ELSE startup_started_at END,
+					interactive_until = now() + $3::interval,
+					updated_at = now()
+				WHERE org_id = $1 AND session_id = $2
+				  AND desired_state IN ('running', 'paused')
+				  AND (
+					desired_state = 'paused'
+					OR interactive_until IS NULL
+					OR interactive_until < now() + $4::interval
+				  )`,
+				terminal.OrgID, terminal.SessionID,
+				intervalString(interactiveSessionLease),
+				intervalString(interactiveSessionLease-interactionRefreshThrottle),
+			); err != nil {
+				return err
+			}
+		}
+
 		var current bool
 		if err := tx.QueryRow(ctx,
 			`SELECT EXISTS (
