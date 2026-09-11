@@ -532,6 +532,13 @@ func (r *Reconciler) reconcileSandbox(ctx context.Context, record domain.Sandbox
 			if err := provider.Stop(ctx, environment.ID); err != nil {
 				return r.fail(ctx, record, err)
 			}
+			// A paused sandbox has no live worker. Mark its connection
+			// disconnected so terminal input correctly sees "no worker" and wakes
+			// the box, instead of enqueuing keystrokes to a dead worker that expire
+			// unclaimed. On resume the worker reconnects under a fresh epoch.
+			if err := r.store.DisconnectSessionWorkers(ctx, record.OrgID, record.SessionID); err != nil {
+				r.log.Warn("disconnect worker on pause", "session_id", record.SessionID, "err", err)
+			}
 		}
 		return r.observe(ctx, record, string(environment.ID), domain.SandboxObservedStopped, "", 30*time.Second)
 	}

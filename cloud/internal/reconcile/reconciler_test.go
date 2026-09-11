@@ -141,3 +141,94 @@ func TestCoderRestoreBootstrapRequiresDurableIdentity(t *testing.T) {
 		t.Fatal("first Coder bootstrap unexpectedly required an existing identity")
 	}
 }
+
+// pausePathStore spies on the two store calls the pause path makes.
+type pausePathStore struct {
+	Store
+	disconnected int
+	observed     string
+}
+
+func (s *pausePathStore) DisconnectSessionWorkers(context.Context, string, string) error {
+	s.disconnected++
+	return nil
+}
+
+func (s *pausePathStore) UpdateSandboxObservation(
+	_ context.Context, _, _, _, _, observedState, _ string, _ time.Time,
+) error {
+	s.observed = observedState
+	return nil
+}
+
+// stopSpyProvider fakes just the two provider calls the pause path uses.
+type stopSpyProvider struct {
+	sandbox.Provider
+	state   string
+	stopped int
+}
+
+func (p *stopSpyProvider) Get(context.Context, sandbox.ID) (sandbox.Environment, error) {
+	return sandbox.Environment{ID: "env-1", State: p.state}, nil
+}
+
+func (p *stopSpyProvider) Stop(context.Context, sandbox.ID) error {
+	p.stopped++
+	return nil
+}
+
+type fixedResolver struct{ provider sandbox.Provider }
+
+func (r fixedResolver) Resolve(context.Context, domain.Sandbox) (sandbox.Provider, error) {
+	return r.provider, nil
+}
+
+// Pausing a running sandbox must stop the provider AND disconnect its worker,
+// so a subsequent terminal keystroke sees "no worker" and wakes the box instead
+// of enqueuing input to a dead worker that expires unclaimed.
+func TestReconcilePauseDisconnectsWorker(t *testing.T) {
+	t.Parallel()
+	store := &pausePathStore{}
+	provider := &stopSpyProvider{state: sandbox.StateRunning}
+	reconciler := New(store, fixedResolver{provider}, Options{})
+	if err := reconciler.reconcileSandbox(context.Background(), domain.Sandbox{
+		SessionID: "session-1", OrgID: "org-1", Provider: sandbox.ProviderNodeOps,
+		DesiredState:          domain.SandboxDesiredPaused,
+		ObservedState:         domain.SandboxObservedRunning,
+		ProviderEnvironmentID: "env-1",
+	}); err != nil {
+		t.Fatalf("reconcileSandbox: %v", err)
+	}
+	if provider.stopped != 1 {
+		t.Fatalf("provider.Stop called %d times, want 1", provider.stopped)
+	}
+	if store.disconnected != 1 {
+		t.Fatalf("DisconnectSessionWorkers called %d times, want 1", store.disconnected)
+	}
+	if store.observed != domain.SandboxObservedStopped {
+		t.Fatalf("observed = %q, want %q", store.observed, domain.SandboxObservedStopped)
+	}
+}
+
+// A sandbox already stopped provider-side must not re-stop or re-disconnect on
+// every reconcile tick while it stays paused.
+func TestReconcilePauseAlreadyStoppedSkipsDisconnect(t *testing.T) {
+	t.Parallel()
+	store := &pausePathStore{}
+	provider := &stopSpyProvider{state: sandbox.StateStopped}
+	reconciler := New(store, fixedResolver{provider}, Options{})
+	if err := reconciler.reconcileSandbox(context.Background(), domain.Sandbox{
+		SessionID: "session-1", OrgID: "org-1", Provider: sandbox.ProviderNodeOps,
+		DesiredState:          domain.SandboxDesiredPaused,
+		ObservedState:         domain.SandboxObservedStopped,
+		ProviderEnvironmentID: "env-1",
+	}); err != nil {
+		t.Fatalf("reconcileSandbox: %v", err)
+	}
+	if provider.stopped != 0 {
+		t.Fatalf("provider.Stop called %d times on an already-stopped env, want 0", provider.stopped)
+	}
+	if store.disconnected != 0 {
+		t.Fatalf("DisconnectSessionWorkers called %d times on an already-stopped env, want 0", store.disconnected)
+	}
+}
