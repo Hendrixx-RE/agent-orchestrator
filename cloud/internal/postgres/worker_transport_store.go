@@ -756,24 +756,39 @@ func (s *Store) queueTerminalRequest(
 	payload []byte,
 ) error {
 	return s.withOrg(ctx, terminal.OrgID, func(tx pgx.Tx) error {
-		var current bool
+		var current, superseded bool
 		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS (
-				SELECT 1 FROM ao_terminal_sessions terminal
-				JOIN ao_worker_connections worker
-				  ON worker.org_id = terminal.org_id
-				 AND worker.session_id = terminal.session_id
-				 AND worker.epoch = terminal.worker_epoch
-				 AND worker.disconnected_at IS NULL
-				WHERE terminal.org_id = $1 AND terminal.session_id = $2
-				  AND terminal.id = $3 AND terminal.worker_epoch = $4
-				  AND terminal.state = 'open' AND terminal.expires_at > now()
-			)`,
+			`SELECT
+				EXISTS (
+					SELECT 1 FROM ao_terminal_sessions terminal
+					JOIN ao_worker_connections worker
+					  ON worker.org_id = terminal.org_id
+					 AND worker.session_id = terminal.session_id
+					 AND worker.epoch = terminal.worker_epoch
+					 AND worker.disconnected_at IS NULL
+					WHERE terminal.org_id = $1 AND terminal.session_id = $2
+					  AND terminal.id = $3 AND terminal.worker_epoch = $4
+					  AND terminal.state = 'open' AND terminal.expires_at > now()
+				),
+				-- A newer epoch already connected means this terminal's worker is
+				-- gone for good, not merely slow to start: retrying for the full
+				-- terminalReadyTimeout would just stall every keystroke until the
+				-- client gives up and reconnects. Fail fast instead so the caller
+				-- can close the stream immediately and let the client re-attach
+				-- against the current epoch.
+				EXISTS (
+					SELECT 1 FROM ao_worker_connections worker
+					WHERE worker.org_id = $1 AND worker.session_id = $2
+					  AND worker.epoch > $4 AND worker.disconnected_at IS NULL
+				)`,
 			terminal.OrgID, terminal.SessionID, terminal.ID, terminal.WorkerEpoch,
-		).Scan(&current); err != nil {
+		).Scan(&current, &superseded); err != nil {
 			return err
 		}
 		if !current {
+			if superseded {
+				return ErrWorkerSuperseded
+			}
 			return ErrWorkerUnavailable
 		}
 		if idempotencyKey != "" {
