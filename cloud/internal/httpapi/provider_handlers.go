@@ -232,10 +232,11 @@ func (s *Server) deleteAgentConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 // putGitHubPAT stores the caller's GitHub personal access token for private
-// repository checkout. It intentionally does not call GitHub: the token is
-// validated by git against the selected repository, and never echoed or logged.
+// repository checkout. The token is checked against GitHub before it is
+// stored — a bad token is rejected here, not surfaced later as an opaque
+// checkout failure inside a sandbox — and it is never echoed or logged.
 func (s *Server) putGitHubPAT(w http.ResponseWriter, r *http.Request) {
-	if s.secretCipher == nil {
+	if s.secretCipher == nil || s.credentialValidator == nil {
 		writeError(w, r, http.StatusServiceUnavailable, "provider_connections_unavailable", "GitHub credential storage is not configured.")
 		return
 	}
@@ -249,6 +250,15 @@ func (s *Server) putGitHubPAT(w http.ResponseWriter, r *http.Request) {
 	request.Secret = ""
 	if len(secret) < 8 || len(secret) > 64<<10 {
 		writeError(w, r, http.StatusUnprocessableEntity, "validation_error", "The GitHub personal access token is invalid.")
+		return
+	}
+	if err := s.credentialValidator.Validate(r.Context(), githubPATProvider, "personal_access_token", secret); err != nil {
+		if errors.Is(err, errInvalidAgentCredential) {
+			writeError(w, r, http.StatusUnprocessableEntity, "invalid_credential", "This GitHub token doesn't work — check it hasn't expired or been revoked.")
+			return
+		}
+		s.logger.Warn("validate GitHub personal access token", "error", err, "request_id", requestID(r))
+		writeError(w, r, http.StatusBadGateway, "provider_unavailable", "GitHub could not be reached to check this token.")
 		return
 	}
 	principal := principalFrom(r)

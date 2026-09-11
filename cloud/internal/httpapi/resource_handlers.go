@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"slices"
@@ -172,6 +173,15 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	config, err := json.Marshal(request.Config)
 	if err != nil {
 		writeError(w, r, http.StatusUnprocessableEntity, "validation_error", "Project configuration is invalid.")
+		return
+	}
+	// Fail here, on a form field, rather than minutes later inside a sandbox at
+	// checkout time: an unreachable URL is rejected before any project row (or
+	// cloud sandbox) is created for it. A probe that cannot run at all (network
+	// hiccup reaching the remote, not the remote's own answer) fails open —
+	// see probeRepositoryReachable.
+	if !s.probeRepositoryReachable(r.Context(), request.RepositoryURL) {
+		writeError(w, r, http.StatusUnprocessableEntity, "repository_unreachable", "Can't reach this repository — it may be private, or the URL may be wrong.")
 		return
 	}
 	project, err := s.store.CreateProject(
@@ -596,6 +606,40 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"session": map[string]any{"id": sessionID, "desiredState": domain.SandboxDesiredDeleted},
 	})
+}
+
+// probeRepositoryReachable asks the git smart-HTTP endpoint whether a
+// repository is there and readable, the same way `git ls-remote` does for an
+// HTTPS remote — no git binary needed, one unauthenticated GET. A public
+// repository answers 200; a private or nonexistent one answers 401/404,
+// which git (and GitHub) both report identically so as not to leak whether a
+// private repository exists. The caller renders both as one message asking
+// for a token, matching that ambiguity rather than pretending to resolve it.
+//
+// A request that cannot even be attempted (bad URL past validProjectInput's
+// own check, DNS/connection failure) fails open: creation is not blocked by
+// an infrastructure hiccup that has nothing to do with whether the repo
+// itself exists.
+func (s *Server) probeRepositoryReachable(ctx context.Context, repositoryURL string) bool {
+	target := strings.TrimSuffix(repositoryURL, "/")
+	if !strings.HasSuffix(target, ".git") {
+		target += ".git"
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(
+		probeCtx, http.MethodGet, target+"/info/refs?service=git-upload-pack", http.NoBody,
+	)
+	if err != nil {
+		return true
+	}
+	response, err := s.repositoryProbeClient.Do(req)
+	if err != nil {
+		return true
+	}
+	defer func() { _ = response.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
+	return response.StatusCode == http.StatusOK
 }
 
 func validProjectInput(request createProjectRequest) bool {
