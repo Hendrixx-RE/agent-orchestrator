@@ -100,44 +100,23 @@ func newSandboxReconciler(
 	// session. AvailableSandboxProviders always contains the default, and is
 	// exactly that default for a single-provider deployment.
 	var (
-		nodeOpsProvider    sandbox.Provider
-		dockerProvider     sandbox.Provider
-		coderProvider      sandbox.Provider
-		workerBinary       []byte
-		workerHelperBinary []byte
-		buildsProvider     bool
-		needsWorkerBinary  bool
+		nodeOpsProvider sandbox.Provider
+		dockerProvider  sandbox.Provider
+		coderProvider   sandbox.Provider
+		buildsProvider  bool
 	)
 	for _, provider := range cfg.AvailableSandboxProviders {
 		switch provider {
 		case sandbox.ProviderNodeOps, sandbox.ProviderDocker, sandbox.ProviderCoder:
 			buildsProvider = true
 		}
-		if provider == sandbox.ProviderNodeOps || provider == sandbox.ProviderCoder {
-			needsWorkerBinary = true
-		}
 	}
 	if !buildsProvider {
 		return nil, nil
 	}
-	if needsWorkerBinary {
-		// The worker binary is read once, at startup. Reading it per provision
-		// would let a mid-flight deploy hand two sandboxes different builds.
-		var err error
-		workerBinary, err = os.ReadFile(cfg.WorkerBinaryPath)
-		if err != nil {
-			return nil, fmt.Errorf("read worker binary %s: %w", cfg.WorkerBinaryPath, err)
-		}
-		if len(workerBinary) == 0 {
-			return nil, fmt.Errorf("worker binary %s is empty", cfg.WorkerBinaryPath)
-		}
-		workerHelperBinary, err = os.ReadFile(cfg.WorkerHelperBinaryPath)
-		if err != nil {
-			return nil, fmt.Errorf("read worker helper binary %s: %w", cfg.WorkerHelperBinaryPath, err)
-		}
-		if len(workerHelperBinary) == 0 {
-			return nil, fmt.Errorf("worker helper binary %s is empty", cfg.WorkerHelperBinaryPath)
-		}
+	workerBinary, workerHelperBinary, err := loadWorkerBinaries(cfg)
+	if err != nil {
+		return nil, err
 	}
 	for _, provider := range cfg.AvailableSandboxProviders {
 		switch provider {
@@ -191,6 +170,38 @@ func newSandboxReconciler(
 		AllowAnonymousCheckout: cfg.AllowAnonymousCheckout,
 		Logger:                 logger,
 	}), nil
+}
+
+// loadWorkerBinaries reads the worker and helper binaries once at startup, but
+// only where a provider that runs hosted workers (nodeops or coder) is offered.
+// Docker-only deployments bake the worker into their image and need neither.
+// Both the reconciler (to advertise the expected hashes) and the API server (to
+// serve the content-addressed self-update endpoint) read the same bytes.
+func loadWorkerBinaries(cfg config.Config) (workerBinary, workerHelperBinary []byte, err error) {
+	needs := false
+	for _, provider := range cfg.AvailableSandboxProviders {
+		if provider == sandbox.ProviderNodeOps || provider == sandbox.ProviderCoder {
+			needs = true
+		}
+	}
+	if !needs {
+		return nil, nil, nil
+	}
+	workerBinary, err = os.ReadFile(cfg.WorkerBinaryPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read worker binary %s: %w", cfg.WorkerBinaryPath, err)
+	}
+	if len(workerBinary) == 0 {
+		return nil, nil, fmt.Errorf("worker binary %s is empty", cfg.WorkerBinaryPath)
+	}
+	workerHelperBinary, err = os.ReadFile(cfg.WorkerHelperBinaryPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read worker helper binary %s: %w", cfg.WorkerHelperBinaryPath, err)
+	}
+	if len(workerHelperBinary) == 0 {
+		return nil, nil, fmt.Errorf("worker helper binary %s is empty", cfg.WorkerHelperBinaryPath)
+	}
+	return workerBinary, workerHelperBinary, nil
 }
 
 func main() {
@@ -310,6 +321,21 @@ func run(logger *slog.Logger) error {
 			return err
 		}
 	}
+	// PAT write fallback: a REST-only GitHub client plus the record store lets a
+	// worker's configured personal access token open and claim pull requests
+	// even where the checkout broker is read-only (staging reaches GitHub through
+	// the remote capability broker, whose write methods are stubbed). The PAT is
+	// decrypted per request in the handler via providerCipher; this only needs
+	// the REST client and the store. Constructed whenever PAT decryption is
+	// possible so PAT-first writes behave consistently with PAT-first reads.
+	var patWrites *githubapp.PATWriteService
+	if providerCipher != nil {
+		// Empty base URL defaults to https://api.github.com, matching the App
+		// client; a GitHub Enterprise host would need a config field here.
+		patWrites = githubapp.NewPATWriteService(
+			githubapp.NewRESTClient("", nil), store,
+		)
+	}
 	reconciler, err := newSandboxReconciler(cfg, store, logger)
 	if err != nil {
 		return err
@@ -340,6 +366,13 @@ func run(logger *slog.Logger) error {
 		workerTokens = worker.NewTokenManager([]byte(cfg.WorkerSigningKey))
 	}
 
+	// The API server serves the content-addressed worker binaries so a worker
+	// with a stale baked copy can self-update; it reads the same startup build
+	// whose hashes the reconciler advertises.
+	apiWorkerBinary, apiWorkerHelperBinary, err := loadWorkerBinaries(cfg)
+	if err != nil {
+		return err
+	}
 	apiOptions := httpapi.Options{
 		Store:                     store,
 		WorkOS:                    workosVerifier,
@@ -350,12 +383,15 @@ func run(logger *slog.Logger) error {
 		Provisioning:              provisioningDefaults(cfg),
 		WorkerTokens:              workerTokens,
 		WorkerTokenTTL:            cfg.WorkerTokenTTL(),
+		WorkerBinary:              apiWorkerBinary,
+		WorkerHelperBinary:        apiWorkerHelperBinary,
 		MaxSandboxes:              cfg.MaxSandboxesPerOrg,
 		Environment:               cfg.Environment,
 		Release:                   cfg.Release,
 		Logger:                    logger,
 		GitHub:                    githubService,
 		CheckoutBroker:            checkoutBroker,
+		PATWrites:                 patWrites,
 		BrokerAuthToken:           cfg.RepositoryBrokerToken,
 		EnvironmentControlToken:   cfg.EnvironmentControlToken,
 		SecretCipher:              providerCipher,
@@ -368,10 +404,16 @@ func run(logger *slog.Logger) error {
 		apiOptions.CredentialValidator = developmentCredentialValidator{}
 	}
 	api := httpapi.New(apiOptions)
-	if cfg.TerminalStreamEnabled {
+	// The work-wait long-poll and terminal streaming both ride a Postgres NOTIFY
+	// listener. Run it wherever workers connect so WaitForWork can be woken on
+	// enqueue; register the terminal channels only when that feature is on.
+	if reconciler != nil {
 		notifyListener := postgres.NewListener(cfg.DatabaseURL, logger)
-		notifyListener.Handle("ao_terminal_output", api.HandleTerminalOutputNotify)
-		notifyListener.Handle("ao_terminal_input", api.HandleTerminalInputNotify)
+		notifyListener.Handle("ao_worker_work", api.HandleWorkerWorkNotify)
+		if cfg.TerminalStreamEnabled {
+			notifyListener.Handle("ao_terminal_output", api.HandleTerminalOutputNotify)
+			notifyListener.Handle("ao_terminal_input", api.HandleTerminalInputNotify)
+		}
 		go func() { _ = notifyListener.Run(ctx) }()
 	}
 	server := &http.Server{

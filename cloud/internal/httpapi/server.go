@@ -153,6 +153,7 @@ type Server struct {
 	logger                  *slog.Logger
 	github                  *githubapp.Service
 	checkoutBroker          CheckoutBroker
+	patWrites               *githubapp.PATWriteService
 	brokerAuthToken         string
 	environmentControlToken string
 	secretCipher            *secrets.Cipher
@@ -160,7 +161,11 @@ type Server struct {
 	webhookMaxBody          int64
 	terminalStreamEnabled   bool
 	terminalStreams         *terminalStreams
-	handler                 http.Handler
+	workWaiters             *workWaiters
+	// workerBinariesBySHA serves the content-addressed worker/helper binaries
+	// so a worker with a stale baked copy can heal itself to this exact build.
+	workerBinariesBySHA map[string][]byte
+	handler             http.Handler
 }
 
 type Options struct {
@@ -173,6 +178,8 @@ type Options struct {
 	Provisioning              sandbox.ProvisioningDefaults
 	WorkerTokens              WorkerTokens
 	WorkerTokenTTL            time.Duration
+	WorkerBinary              []byte
+	WorkerHelperBinary        []byte
 	WorkerRequestTimeout      time.Duration
 	MaxSandboxes              int
 	Environment               string
@@ -180,6 +187,7 @@ type Options struct {
 	Logger                    *slog.Logger
 	GitHub                    *githubapp.Service
 	CheckoutBroker            CheckoutBroker
+	PATWrites                 *githubapp.PATWriteService
 	BrokerAuthToken           string
 	EnvironmentControlToken   string
 	SecretCipher              *secrets.Cipher
@@ -248,6 +256,7 @@ func New(options Options) *Server {
 		logger:                    logger,
 		github:                    options.GitHub,
 		checkoutBroker:            options.CheckoutBroker,
+		patWrites:                 options.PATWrites,
 		brokerAuthToken:           options.BrokerAuthToken,
 		environmentControlToken:   options.EnvironmentControlToken,
 		secretCipher:              options.SecretCipher,
@@ -255,7 +264,9 @@ func New(options Options) *Server {
 		webhookMaxBody:            webhookMaxBody,
 		terminalStreamEnabled:     options.TerminalStreamEnabled,
 		terminalStreams:           newTerminalStreams(),
+		workWaiters:               newWorkWaiters(),
 	}
+	server.workerBinariesBySHA = indexWorkerBinaries(options.WorkerBinary, options.WorkerHelperBinary)
 	if server.credentialValidator == nil {
 		server.credentialValidator = newAgentCredentialValidator(nil)
 	}
@@ -316,9 +327,18 @@ func New(options Options) *Server {
 		// server.authenticate. Bootstrap is gated by a one-time ticket;
 		// everything after it by a short-lived worker token.
 		router.Post("/worker/bootstrap", server.workerBootstrap)
+		// A worker heals a stale baked binary by fetching the exact version the
+		// control plane runs, addressed by its hash. The bytes are not secret —
+		// they ship in every sandbox image — so this is content-addressed and
+		// unauthenticated like bootstrap itself.
+		router.Get("/worker/binary/{sha256}", server.serveWorkerBinary)
 		router.Group(func(router chi.Router) {
 			router.Use(server.workerAuth)
 			router.Post("/worker/heartbeat", server.workerHeartbeat)
+			// A restarted worker re-presents its persisted token and asks for its
+			// durable launch context here, so it never redeems a fresh bootstrap
+			// ticket for a sandbox it is already registered on.
+			router.Get("/worker/reconnect", server.workerReconnect)
 			router.Post("/worker/events", server.workerEvent)
 			router.Post("/worker/turns/claim", server.workerClaimTurn)
 			router.Get("/worker/turns/{turnId}/cancellation", server.workerTurnCancellation)
@@ -337,6 +357,10 @@ func New(options Options) *Server {
 			router.Delete("/worker/children/{sessionId}", server.deleteWorkerChild)
 			router.Post("/worker/parent/messages", server.reportToParent)
 			router.Post("/worker/transport/claim", server.workerClaimTransport)
+			// The worker blocks here (long-poll) instead of busy-polling the
+			// claim routes; the control plane wakes it the instant a turn or
+			// transport request is enqueued for its session.
+			router.Get("/worker/work/wait", server.workerWaitForWork)
 			router.Post("/worker/transport/{requestId}/complete", server.workerCompleteTransport)
 			router.Post("/worker/transport/{requestId}/fail", server.workerFailTransport)
 			router.Post("/worker/terminals/{terminalId}/output", server.workerTerminalOutput)
