@@ -351,6 +351,17 @@ func (s *Server) writeTerminalOutput(
 	defer ticker.Stop()
 	startupDeadline := time.NewTimer(terminalReadyTimeout)
 	defer startupDeadline.Stop()
+	// Retiring an epoch (a resume/repair connecting a replacement worker)
+	// never touches this terminal's ao_terminal_sessions row, so `state`
+	// alone would keep reading "open" for as long as terminalSessionTTL (30m)
+	// even though nothing is behind it any more. Without an active check here
+	// the only things that ever notice are a queued keystroke (immediate,
+	// but only if the user types) or the ping/pong keepalive eventually
+	// timing out (observed taking well over a minute) -- both leave an idle,
+	// silently-dead terminal open indefinitely. Poll epoch liveness on its
+	// own slow cadence so staleness is caught within seconds either way.
+	staleCheck := time.NewTicker(2 * time.Second)
+	defer staleCheck.Stop()
 	// With the stream enabled, a Postgres NOTIFY wakes this loop the moment a
 	// new output row commits; the ticker stays as the cross-replica and
 	// missed-notification fallback.
@@ -441,6 +452,10 @@ func (s *Server) writeTerminalOutput(
 			}
 		case <-wake:
 		case <-ticker.C:
+		case <-staleCheck.C:
+			if current, err := s.store.TerminalWorkerEpochCurrent(ctx, terminal); err == nil && !current {
+				return postgres.ErrWorkerSuperseded
+			}
 		}
 	}
 }
