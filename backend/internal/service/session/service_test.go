@@ -14,8 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	"github.com/aoagents/agent-orchestrator/backend/internal/observe/ownership"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 )
@@ -26,6 +29,36 @@ func (f *fakeTelemetrySink) Emit(_ context.Context, ev ports.TelemetryEvent) {
 	f.events = append(f.events, ev)
 }
 func (f *fakeTelemetrySink) Close(context.Context) error { return nil }
+
+type fakeAgentReadiness struct {
+	snapshot                domain.AgentReadinessSnapshot
+	err                     error
+	calls                   int
+	agentID                 string
+	purpose                 domain.AgentReadinessPurpose
+	installationInvalidated []string
+	authInvalidated         []string
+	rechecks                []string
+}
+
+func (f *fakeAgentReadiness) EnsureAgentReadiness(_ context.Context, agentID string, purpose domain.AgentReadinessPurpose) (domain.AgentReadinessSnapshot, error) {
+	f.calls++
+	f.agentID = agentID
+	f.purpose = purpose
+	return f.snapshot, f.err
+}
+
+func (f *fakeAgentReadiness) InvalidateAgentInstallation(agentID string) {
+	f.installationInvalidated = append(f.installationInvalidated, agentID)
+}
+
+func (f *fakeAgentReadiness) InvalidateAgentAuthentication(agentID string) {
+	f.authInvalidated = append(f.authInvalidated, agentID)
+}
+
+func (f *fakeAgentReadiness) RecheckAgent(agentID string) {
+	f.rechecks = append(f.rechecks, agentID)
+}
 
 type fakeStore struct {
 	sessions            map[domain.SessionID]domain.SessionRecord
@@ -259,12 +292,13 @@ func (f *fakeStore) SetSessionAutoInjectCI(_ context.Context, id domain.SessionI
 	return true, nil
 }
 
-func (f *fakeStore) SetSessionReviewerHarness(_ context.Context, id domain.SessionID, harness domain.ReviewerHarness, updatedAt time.Time) (bool, error) {
+func (f *fakeStore) SetSessionReviewerConfig(_ context.Context, id domain.SessionID, harness domain.ReviewerHarness, config domain.AgentConfig, updatedAt time.Time) (bool, error) {
 	r, ok := f.sessions[id]
 	if !ok {
 		return false, nil
 	}
 	r.ReviewerHarness = harness
+	r.ReviewerConfig = config
 	r.UpdatedAt = updatedAt
 	f.sessions[id] = r
 	return true, nil
@@ -571,7 +605,7 @@ func TestSessionSetReviewerHarnessPersistsPerSession(t *testing.T) {
 	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker}
 	st.sessions["mer-2"] = domain.SessionRecord{ID: "mer-2", ProjectID: "mer", Kind: domain.KindWorker}
 
-	sess, err := (&Service{store: st}).SetReviewerHarness(context.Background(), "mer-1", domain.ReviewerOpenCode)
+	sess, err := (&Service{store: st}).SetReviewerHarness(context.Background(), "mer-1", domain.ReviewerOpenCode, domain.AgentConfig{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,8 +620,24 @@ func TestSessionSetReviewerHarnessPersistsPerSession(t *testing.T) {
 func TestSessionSetReviewerHarnessRejectsUnknownHarness(t *testing.T) {
 	st := newFakeStore()
 	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1"}
-	if _, err := (&Service{store: st}).SetReviewerHarness(context.Background(), "mer-1", "unknown"); err == nil {
+	if _, err := (&Service{store: st}).SetReviewerHarness(context.Background(), "mer-1", "unknown", domain.AgentConfig{}); err == nil {
 		t.Fatal("expected invalid harness error")
+	}
+}
+
+func TestSessionSetReviewerHarnessAllowsConfigWithoutHarness(t *testing.T) {
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1"}
+
+	sess, err := (&Service{store: st}).SetReviewerHarness(context.Background(), "mer-1", "", domain.AgentConfig{Model: "gpt-5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.ReviewerHarness != "" || sess.ReviewerConfig.Model != "gpt-5" {
+		t.Fatalf("session reviewer override = (%q, %+v), want default harness with model override", sess.ReviewerHarness, sess.ReviewerConfig)
+	}
+	if stored := st.sessions["mer-1"]; stored.ReviewerHarness != "" || stored.ReviewerConfig.Model != "gpt-5" {
+		t.Fatalf("stored reviewer override = (%q, %+v), want default harness with model override", stored.ReviewerHarness, stored.ReviewerConfig)
 	}
 }
 
@@ -647,6 +697,31 @@ func TestListWorkspaceFilesReturnsTrackedAndUntrackedStatus(t *testing.T) {
 	}
 	if byPath["README.md"].Additions == 0 || byPath["README.md"].Deletions == 0 {
 		t.Fatalf("README counts = +%d -%d, want non-zero diff counts", byPath["README.md"].Additions, byPath["README.md"].Deletions)
+	}
+}
+
+func TestListWorkspaceFilesRepoUnavailableWrapsSentinel(t *testing.T) {
+	repo := newWorkspaceRepo(t)
+	// Simulate a project whose source repository has been deleted from disk:
+	// the worktree directory still exists, but its git metadata (and so the
+	// owning repo's plumbing) is gone. Every git read against it must fail as
+	// repository-unavailable rather than a raw 500.
+	if err := os.RemoveAll(filepath.Join(repo, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	st := newFakeStore()
+	st.sessions["ao-1"] = domain.SessionRecord{
+		ID:       "ao-1",
+		Metadata: domain.SessionMetadata{WorkspacePath: repo},
+		Activity: domain.Activity{State: domain.ActivityActive},
+	}
+
+	_, err := (&Service{store: st}).ListWorkspaceFiles(context.Background(), "ao-1")
+	if err == nil {
+		t.Fatal("ListWorkspaceFiles succeeded with a missing repository")
+	}
+	if !errors.Is(err, ports.ErrWorkspaceRepoUnavailable) {
+		t.Fatalf("error = %v, want errors.Is(ErrWorkspaceRepoUnavailable)", err)
 	}
 }
 
@@ -2133,6 +2208,7 @@ func TestSessionRenameMissingSessionReturnsNotFound(t *testing.T) {
 type fakeCommander struct {
 	killed          []domain.SessionID
 	retired         []domain.SessionID
+	exited          []domain.SessionID
 	resumed         []domain.SessionID
 	ready           []domain.SessionID
 	sent            []domain.SessionID
@@ -2196,6 +2272,15 @@ func (f *fakeCommander) ResumeAgentWithMode(_ context.Context, id domain.Session
 		return sessionmanager.RestoreResult{}, f.restoreErr
 	}
 	return f.restoreResult, nil
+}
+func (f *fakeCommander) ExitAgent(_ context.Context, id domain.SessionID) (domain.SessionRecord, error) {
+	f.exited = append(f.exited, id)
+	if f.restoreErr != nil {
+		return domain.SessionRecord{}, f.restoreErr
+	}
+	rec := f.restoreResult.Session
+	rec.Activity.State = domain.ActivityExited
+	return rec, nil
 }
 func (f *fakeCommander) Kill(_ context.Context, id domain.SessionID) (bool, error) {
 	if f.killErr != nil {
@@ -2432,6 +2517,82 @@ func TestSpawnUnknownProjectReturns404(t *testing.T) {
 	}
 	if fc.spawned {
 		t.Fatal("manager.Spawn must NOT be invoked for an unknown project")
+	}
+}
+
+func TestSpawnBlocksDefinitelyMissingHarnessBeforeManager(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+	fc := &fakeCommander{}
+	readiness := &fakeAgentReadiness{snapshot: domain.AgentReadinessSnapshot{
+		ID: "codex", Installation: domain.AgentInstallationObservation{State: domain.AgentInstallationNotInstalled},
+		Authentication: domain.AgentAuthenticationObservation{State: domain.AgentAuthenticationUnknown},
+	}}
+	svc := NewWithDeps(Deps{Manager: fc, Store: st, AgentReadiness: readiness})
+
+	_, _, _, err := svc.Spawn(context.Background(), ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: "codex"})
+	var apiError *apierr.Error
+	if !errors.As(err, &apiError) || apiError.Code != "AGENT_BINARY_NOT_FOUND" {
+		t.Fatalf("Spawn error = %v, want AGENT_BINARY_NOT_FOUND", err)
+	}
+	if fc.spawnCalls != 0 {
+		t.Fatal("manager.Spawn ran before a definitely-missing harness was blocked")
+	}
+	if readiness.calls != 1 || readiness.purpose != domain.AgentReadinessPurposeLaunch {
+		t.Fatalf("readiness call = count %d purpose %q", readiness.calls, readiness.purpose)
+	}
+}
+
+func TestSpawnTreatsUnauthorizedReadinessAsAdvisory(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+	fc := &fakeCommander{}
+	readiness := &fakeAgentReadiness{snapshot: domain.AgentReadinessSnapshot{
+		ID: "codex", Installation: domain.AgentInstallationObservation{State: domain.AgentInstallationInstalled},
+		Authentication: domain.AgentAuthenticationObservation{State: domain.AgentAuthenticationUnauthorized},
+	}}
+	svc := NewWithDeps(Deps{Manager: fc, Store: st, AgentReadiness: readiness})
+
+	if _, _, _, err := svc.Spawn(context.Background(), ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: "codex"}); err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if fc.spawnCalls != 1 {
+		t.Fatalf("manager.Spawn calls = %d, want unauthorized readiness to remain advisory", fc.spawnCalls)
+	}
+}
+
+func TestSpawnInvalidatesReadinessAfterTypedLaunchFailure(t *testing.T) {
+	tests := []struct {
+		name             string
+		err              error
+		wantInstallation bool
+		wantAuth         bool
+	}{
+		{name: "binary missing", err: ports.ErrAgentBinaryNotFound, wantInstallation: true},
+		{name: "auth required", err: ports.ErrChatAuthRequired, wantAuth: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+			fc := &fakeCommander{spawnErr: tt.err}
+			readiness := &fakeAgentReadiness{snapshot: domain.AgentReadinessSnapshot{
+				ID: "codex", Installation: domain.AgentInstallationObservation{State: domain.AgentInstallationInstalled},
+				Authentication: domain.AgentAuthenticationObservation{State: domain.AgentAuthenticationAuthorized},
+			}}
+			svc := NewWithDeps(Deps{Manager: fc, Store: st, AgentReadiness: readiness})
+
+			_, _, _, _ = svc.Spawn(context.Background(), ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: "codex"})
+			if got := len(readiness.installationInvalidated) == 1; got != tt.wantInstallation {
+				t.Fatalf("installation invalidated = %v, want %v", got, tt.wantInstallation)
+			}
+			if got := len(readiness.authInvalidated) == 1; got != tt.wantAuth {
+				t.Fatalf("auth invalidated = %v, want %v", got, tt.wantAuth)
+			}
+			if len(readiness.rechecks) != 1 || readiness.rechecks[0] != "codex" {
+				t.Fatalf("rechecks = %#v, want codex", readiness.rechecks)
+			}
+		})
 	}
 }
 
@@ -2890,10 +3051,12 @@ func TestToAPIErrorMapsWorkspaceBranchSentinels(t *testing.T) {
 		{"invalid branch", fmt.Errorf("spawn mer-1: workspace: %w: \"bad!!\" (exit 1)", ports.ErrWorkspaceBranchInvalid), apierr.KindInvalid, "INVALID_BRANCH"},
 		{"agent binary not found", fmt.Errorf("spawn mer-1: %w", ports.ErrAgentBinaryNotFound), apierr.KindInvalid, "AGENT_BINARY_NOT_FOUND"},
 		{"runtime prerequisite missing", fmt.Errorf("spawn: %w: tmux required on macOS/Linux but not in PATH", ports.ErrRuntimePrerequisite), apierr.KindInvalid, "RUNTIME_PREREQUISITE_MISSING"},
+		{"Windows command line too long", fmt.Errorf("spawn: %w: escaped command line is 32769 UTF-16 code units", ports.ErrRuntimeCommandLineTooLong), apierr.KindInvalid, "WINDOWS_COMMAND_LINE_TOO_LONG"},
 		{"runtime workspace cwd mismatch", fmt.Errorf("spawn mer-1: runtime: %w: session mer-1 started in \"/deleted/shipit\", want \"/tmp/ws\"", ports.ErrRuntimeWorkspaceCwdMismatch), apierr.KindConflict, "WORKSPACE_CWD_MISMATCH"},
 		{"workspace locked", fmt.Errorf("restore mer-1: %w: \"/tmp/ws\" (branch \"ao/mer-1\") is registered but its directory is missing", ports.ErrWorkspaceLocked), apierr.KindConflict, "WORKSPACE_LOCKED"},
 		{"unknown harness", fmt.Errorf("spawn: %w: %q", sessionmanager.ErrUnknownHarness, "bogus"), apierr.KindInvalid, "UNKNOWN_HARNESS"},
 		{"missing harness", fmt.Errorf("spawn: %w: configure project worker.agent or pass --harness", sessionmanager.ErrMissingHarness), apierr.KindInvalid, "AGENT_REQUIRED"},
+		{"harness install active", fmt.Errorf("spawn: %w", sessionmanager.ErrHarnessInstallActive), apierr.KindConflict, "HARNESS_INSTALL_ACTIVE"},
 		{"awaiting decision", fmt.Errorf("send mer-1: %w", sessionmanager.ErrAwaitingDecision), apierr.KindConflict, "SESSION_AWAITING_DECISION"},
 		{"startup pending", fmt.Errorf("send mer-1: %w", sessionmanager.ErrStartupPending), apierr.KindConflict, "SESSION_STARTUP_PENDING"},
 		{"agent exited", fmt.Errorf("send mer-1: %w", sessionmanager.ErrAgentExited), apierr.KindConflict, "AGENT_EXITED"},
@@ -3044,7 +3207,7 @@ func TestEmitSpawnFailedClassifiesRawStageSentinel(t *testing.T) {
 	})
 
 	raw := fmt.Errorf("spawn mer-1: %w: tmux runtime: create session mer-1: boom", sessionmanager.ErrRuntimeCreate)
-	svc.emitSpawnFailed(ports.SpawnConfig{
+	svc.emitSpawnFailed(context.Background(), ports.SpawnConfig{
 		ProjectID: "mer",
 		Kind:      domain.KindWorker,
 		Harness:   domain.HarnessCodex,
@@ -3092,6 +3255,30 @@ func TestToAPIErrorSwitchDeliveryUnconfirmedMessage(t *testing.T) {
 	const wantMessage = "The target agent started, but AO could not confirm that it accepted the continuation"
 	if apiError.Message != wantMessage {
 		t.Fatalf("message = %q, want %q", apiError.Message, wantMessage)
+	}
+}
+
+func TestToAPIErrorPreservesReportingOwnerAcrossMapping(t *testing.T) {
+	raw := ownership.Own(
+		fmt.Errorf("switch agent mer-1: %w", sessionmanager.ErrSwitchInProgress),
+		ownership.OwnerAgentSwitchSaga,
+	)
+
+	mapped := toAPIError(raw)
+
+	if got := ownership.OwnerOf(mapped); got != ownership.OwnerAgentSwitchSaga {
+		t.Fatalf("OwnerOf(mapped) = %q, want %q", got, ownership.OwnerAgentSwitchSaga)
+	}
+	var apiError *apierr.Error
+	if !errors.As(mapped, &apiError) || apiError.Code != "AGENT_SWITCH_IN_PROGRESS" {
+		t.Fatalf("mapped = %v, want AGENT_SWITCH_IN_PROGRESS", mapped)
+	}
+}
+
+func TestToAPIErrorDefaultsUnownedErrorsToHTTP(t *testing.T) {
+	mapped := toAPIError(errors.New("pre-admission storage unavailable"))
+	if got := ownership.OwnerOf(mapped); got != ownership.OwnerHTTP {
+		t.Fatalf("OwnerOf(mapped) = %q, want %q", got, ownership.OwnerHTTP)
 	}
 }
 
@@ -3182,6 +3369,30 @@ func TestResumeAgentMapsManagerModeToServiceView(t *testing.T) {
 	}
 	if got.Session.ID != "mer-1" || got.Mode != RestoreModeViewNative {
 		t.Fatalf("resume outcome = %+v", got)
+	}
+}
+
+func TestExitAgentPreservesSessionAndMapsExitedReadModel(t *testing.T) {
+	st := newFakeStore()
+	rec := domain.SessionRecord{
+		ID:        "mer-1",
+		ProjectID: "mer",
+		Kind:      domain.KindWorker,
+		Harness:   domain.HarnessCodex,
+		Activity:  domain.Activity{State: domain.ActivityIdle},
+	}
+	fc := &fakeCommander{restoreResult: sessionmanager.RestoreResult{Session: rec}}
+	svc := &Service{manager: fc, store: st}
+
+	got, err := svc.ExitAgent(context.Background(), "mer-1")
+	if err != nil {
+		t.Fatalf("ExitAgent: %v", err)
+	}
+	if got.Session.ID != "mer-1" || got.Session.IsTerminated || got.Session.Activity.State != domain.ActivityExited {
+		t.Fatalf("exit outcome = %+v", got)
+	}
+	if len(fc.exited) != 1 || fc.exited[0] != "mer-1" {
+		t.Fatalf("exit calls = %v", fc.exited)
 	}
 }
 
@@ -3500,7 +3711,7 @@ func TestClaimRowsFromSCMSnapshotsSessionReviewPolicy(t *testing.T) {
 	}
 	for _, autoInject := range []bool{false, true} {
 		t.Run(fmt.Sprintf("auto_inject_%t", autoInject), func(t *testing.T) {
-			_, _, reviews, _, comments := claimRowsFromSCM("mer-1", obs, now, domain.SessionRecord{AutoInjectReview: autoInject})
+			_, _, reviews, _, comments := claimRowsFromSCM("mer-1", obs, ports.ReviewWriteReplace, now, domain.SessionRecord{AutoInjectReview: autoInject})
 			if len(reviews) != 1 || reviews[0].AutoInjectReview != autoInject {
 				t.Fatalf("reviews = %+v, want policy %t", reviews, autoInject)
 			}
@@ -3509,22 +3720,6 @@ func TestClaimRowsFromSCMSnapshotsSessionReviewPolicy(t *testing.T) {
 			}
 		})
 	}
-}
-
-// noopSCMProvider implements scmProvider but always fails ParseRepository
-// to exercise the scmRepoForClaim fallback path.
-type noopSCMProvider struct{}
-
-func (noopSCMProvider) ParseRepository(string) (ports.SCMRepo, bool) { return ports.SCMRepo{}, false }
-func (noopSCMProvider) FetchPullRequests(_ context.Context, refs []ports.SCMPRRef) ([]ports.SCMObservation, error) {
-	out := make([]ports.SCMObservation, len(refs))
-	for i := range out {
-		out[i].Error = ports.ErrSCMNotFound
-	}
-	return out, nil
-}
-func (noopSCMProvider) FetchReviewThreads(context.Context, ports.SCMPRRef) (ports.SCMReviewObservation, error) {
-	return ports.SCMReviewObservation{}, nil
 }
 
 func (f fakeSCM) ParseRepository(remote string) (ports.SCMRepo, bool) {
@@ -3844,7 +4039,7 @@ func TestRequireSameRepoGitLab(t *testing.T) {
 	}{
 		{"matching gitlab", "https://gitlab.com/castai/ctxd/-/merge_requests/9", "https://gitlab.com/castai/ctxd", nil},
 		{"matching github", "https://github.com/owner/repo/pull/42", "https://github.com/owner/repo", nil},
-		{"empty origin allows any", "https://gitlab.com/castai/ctxd/-/merge_requests/9", "", nil},
+		{"empty origin rejects", "https://gitlab.com/castai/ctxd/-/merge_requests/9", "", ErrProjectMismatch},
 		{"mismatch", "https://gitlab.com/castai/ctxd/-/merge_requests/9", "https://github.com/other/repo", ErrProjectMismatch},
 		{"gitlab mismatch repo", "https://gitlab.com/castai/ctxd/-/merge_requests/9", "https://gitlab.com/other/repo", ErrProjectMismatch},
 		// Cross-provider mismatch: same owner/repo name on GitHub and GitLab
@@ -3875,10 +4070,8 @@ func TestRequireSameRepoGitLab(t *testing.T) {
 }
 
 func TestScmRepoForClaimGitLab(t *testing.T) {
-	// When the provider cannot parse the origin, the fallback should detect
-	// GitLab from the PR URL and set Provider="gitlab".
-	var noopProvider noopSCMProvider
-	repo, err := scmRepoForClaim(noopProvider, "", "https://gitlab.com/castai/ctxd/-/merge_requests/9")
+	// The SCM target comes from the claimed URL, including its provider.
+	repo, err := scmRepoForClaim("https://gitlab.com/castai/ctxd/-/merge_requests/9")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3923,6 +4116,7 @@ func TestListPRSummariesExposesReviewSummariesButKeepsRawLogsAndCommentBodiesPri
 		Repo:                     "acme/repo",
 		Title:                    "Fix dashboard",
 		Author:                   "ada",
+		AuthorAvatarURL:          "https://avatars.githubusercontent.com/u/123?v=4",
 		SourceBranch:             "fix/dashboard",
 		TargetBranch:             "main",
 		HeadSHA:                  "abc123",
@@ -3945,6 +4139,12 @@ func TestListPRSummariesExposesReviewSummariesButKeepsRawLogsAndCommentBodiesPri
 		{Author: "reviewer-a", File: "main.go", Line: 14, Body: "resolved body", URL: "https://github.com/acme/repo/pull/7#discussion_r4", Resolved: true},
 		{Author: "reviewer-a", File: "test.go", Line: 22, Body: "another raw body", URL: "https://github.com/acme/repo/pull/7#discussion_r3", AutoInjectReview: true},
 	}
+	stList.threads[prURL] = []domain.PullRequestReviewThread{
+		{ThreadID: "thread-1"},
+		{ThreadID: "thread-2"},
+		{ThreadID: "thread-3", Resolved: true},
+		{ThreadID: "thread-4", IsBot: true},
+	}
 
 	got, err := (&Service{store: stList}).ListPRSummaries(context.Background(), "mer-1")
 	if err != nil {
@@ -3957,10 +4157,13 @@ func TestListPRSummariesExposesReviewSummariesButKeepsRawLogsAndCommentBodiesPri
 	if pr.Title != "Fix dashboard" || pr.State != domain.PRStateOpen || pr.Provider != "github" || pr.Repo != "acme/repo" || pr.HeadSHA != "abc123" {
 		t.Fatalf("metadata = %+v", pr)
 	}
+	if pr.Author != "ada" || pr.AuthorAvatarURL != "https://avatars.githubusercontent.com/u/123?v=4" {
+		t.Fatalf("author metadata = %+v", pr)
+	}
 	if len(pr.CI.FailingChecks) != 1 || pr.CI.FailingChecks[0].Name != "unit" || pr.CI.FailingChecks[0].URL == "" {
 		t.Fatalf("failing checks = %+v", pr.CI.FailingChecks)
 	}
-	if pr.Review.Decision != domain.ReviewChangesRequest || !pr.Review.HasUnresolvedHumanComments || len(pr.Review.UnresolvedBy) != 1 {
+	if pr.Review.Decision != domain.ReviewChangesRequest || !pr.Review.HasUnresolvedHumanComments || pr.Review.UnresolvedThreadCount == nil || *pr.Review.UnresolvedThreadCount != 2 || len(pr.Review.UnresolvedBy) != 1 {
 		t.Fatalf("review = %+v", pr.Review)
 	}
 	if reviewer := pr.Review.UnresolvedBy[0]; reviewer.ReviewerID != "reviewer-a" || reviewer.Count != 2 || len(reviewer.Links) != 2 {
@@ -4003,6 +4206,127 @@ func TestListPRSummariesExposesReviewSummariesButKeepsRawLogsAndCommentBodiesPri
 	}
 }
 
+func TestListPRSummariesThreadCountKnownOnlyForCompleteObservations(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	unresolved := []domain.PullRequestReviewThread{{ThreadID: "thread-1"}, {ThreadID: "thread-2"}}
+
+	cases := []struct {
+		name string
+		pr   domain.PullRequest
+		want *int // nil means the count must stay unknown
+	}{
+		{
+			name: "complete observation publishes the exact count",
+			pr:   domain.PullRequest{URL: "https://github.com/acme/repo/pull/1", SessionID: "mer-1", Number: 1, ReviewObservedAt: now},
+			want: intPtrForTest(2),
+		},
+		{
+			name: "partial observation omits the count",
+			pr:   domain.PullRequest{URL: "https://github.com/acme/repo/pull/2", SessionID: "mer-1", Number: 2, ReviewObservedAt: now, ReviewPartial: true},
+			want: nil,
+		},
+		{
+			name: "never-observed reviews omit the count",
+			pr:   domain.PullRequest{URL: "https://github.com/acme/repo/pull/3", SessionID: "mer-1", Number: 3},
+			want: nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker}
+			stList := &multiPRFakeStore{fakeStore: st, prs: []domain.PullRequest{tc.pr}}
+			stList.threads[tc.pr.URL] = unresolved
+
+			got, err := (&Service{store: stList}).ListPRSummaries(context.Background(), "mer-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("summaries = %+v", got)
+			}
+			count := got[0].Review.UnresolvedThreadCount
+			if tc.want == nil {
+				if count != nil {
+					t.Fatalf("unresolvedThreadCount = %d, want unknown (nil)", *count)
+				}
+				return
+			}
+			if count == nil || *count != *tc.want {
+				t.Fatalf("unresolvedThreadCount = %v, want %d", count, *tc.want)
+			}
+		})
+	}
+}
+
+func TestListPRSummariesThreadCountSerializesObservedZero(t *testing.T) {
+	// An observed zero must survive the DTO round trip as an explicit 0 rather
+	// than being dropped by omitempty.
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	prURL := "https://github.com/acme/repo/pull/4"
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker}
+	stList := &multiPRFakeStore{fakeStore: st, prs: []domain.PullRequest{{URL: prURL, SessionID: "mer-1", Number: 4, ReviewObservedAt: now}}}
+	stList.threads[prURL] = []domain.PullRequestReviewThread{{ThreadID: "thread-1", Resolved: true}}
+
+	got, err := (&Service{store: stList}).ListPRSummaries(context.Background(), "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := got[0].Review.UnresolvedThreadCount; count == nil || *count != 0 {
+		t.Fatalf("unresolvedThreadCount = %v, want explicit 0", count)
+	}
+}
+
+func TestListPRSummariesDedupesAliasReviewThreads(t *testing.T) {
+	// The same provider thread persisted under two repository-URL aliases of
+	// one canonical PR must count once, with the fresher alias record winning
+	// a disagreement.
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	oldURL := "https://github.com/acme/repo/pull/9"
+	newURL := "https://github.com/acme-corp/repo/pull/9"
+	st := newFakeStore()
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker}
+	pr := func(url string) domain.PullRequest {
+		return domain.PullRequest{
+			URL: url, SessionID: "mer-1", Number: 9, Provider: "github",
+			SourceBranch: "fix/alias", HeadSHA: "abc123",
+			ReviewObservedAt: now, UpdatedAt: now,
+		}
+	}
+	stList := &multiPRFakeStore{fakeStore: st, prs: []domain.PullRequest{pr(oldURL), pr(newURL)}}
+	// Same unresolved thread under both aliases: one thread, not two.
+	stList.threads[oldURL] = []domain.PullRequestReviewThread{{ThreadID: "thread-1", UpdatedAt: now.Add(-time.Hour)}}
+	stList.threads[newURL] = []domain.PullRequestReviewThread{{ThreadID: "thread-1", UpdatedAt: now}}
+
+	got, err := (&Service{store: stList}).ListPRSummaries(context.Background(), "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("aliases did not group: %+v", got)
+	}
+	if count := got[0].Review.UnresolvedThreadCount; count == nil || *count != 1 {
+		t.Fatalf("unresolvedThreadCount = %v, want 1", count)
+	}
+
+	// Conflicting aliases: the old alias still has the thread unresolved, the
+	// newer alias records it resolved. The fresher record wins, so the exact
+	// count is 0.
+	stList.threads[oldURL] = []domain.PullRequestReviewThread{{ThreadID: "thread-1", UpdatedAt: now.Add(-time.Hour)}}
+	stList.threads[newURL] = []domain.PullRequestReviewThread{{ThreadID: "thread-1", Resolved: true, UpdatedAt: now}}
+
+	got, err = (&Service{store: stList}).ListPRSummaries(context.Background(), "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := got[0].Review.UnresolvedThreadCount; count == nil || *count != 0 {
+		t.Fatalf("unresolvedThreadCount = %v, want 0", count)
+	}
+}
+
+func intPtrForTest(v int) *int { return &v }
+
 func TestSummarizeReviewSurfacesSubmittedReviewSummaries(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	reviews := []domain.PullRequestReview{
@@ -4013,7 +4337,7 @@ func TestSummarizeReviewSurfacesSubmittedReviewSummaries(t *testing.T) {
 		{ID: "c", Author: "charlie", State: domain.ReviewNone, Body: "non-blocking suggestion", URL: "url-c", SubmittedAt: now},
 	}
 
-	got := summarizeReview(domain.PullRequest{URL: "u", Review: domain.ReviewChangesRequest}, nil, reviews)
+	got := summarizeReview(domain.PullRequest{URL: "u", Review: domain.ReviewChangesRequest}, nil, reviews, nil, false)
 
 	byReviewer := map[string]PRReviewEntry{}
 	for _, entry := range got.Reviews {
@@ -4517,4 +4841,57 @@ func sameStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+// TestSpawnTelemetryCarriesRequestID pins the correlation the daemon needs:
+// spawn telemetry detaches from the request context on purpose, so the request
+// id has to be read at the emit site or every session_service row lands with an
+// empty request_id and cannot be joined to the HTTP request that caused it.
+func TestSpawnTelemetryCarriesRequestID(t *testing.T) {
+	requestCtx := context.WithValue(context.Background(), middleware.RequestIDKey, "req-1")
+	cases := []struct {
+		name     string
+		ctx      context.Context
+		spawnErr error
+		want     string
+	}{
+		{name: "request scoped", ctx: requestCtx, want: "req-1"},
+		{
+			name: "spawn failure",
+			ctx:  requestCtx,
+			spawnErr: fmt.Errorf(
+				"spawn mer-1: %w: tmux runtime: create session mer-1: boom",
+				sessionmanager.ErrRuntimeCreate,
+			),
+			want: "req-1",
+		},
+		{name: "background context", ctx: context.Background(), want: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer", RegisteredAt: time.Unix(100, 0).UTC()}
+			sink := &fakeTelemetrySink{}
+			svc := NewWithDeps(Deps{
+				Manager:   &fakeCommander{spawnErr: tc.spawnErr},
+				Store:     st,
+				Telemetry: sink,
+				Clock:     func() time.Time { return time.Unix(102, 0).UTC() },
+			})
+
+			_, _, _, err := svc.Spawn(tc.ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker})
+			if (err != nil) != (tc.spawnErr != nil) {
+				t.Fatalf("Spawn err = %v, want error: %t", err, tc.spawnErr != nil)
+			}
+			if len(sink.events) == 0 {
+				t.Fatal("no telemetry events emitted")
+			}
+			for _, ev := range sink.events {
+				if ev.RequestID != tc.want {
+					t.Fatalf("%s RequestID = %q, want %q", ev.Name, ev.RequestID, tc.want)
+				}
+			}
+		})
+	}
 }

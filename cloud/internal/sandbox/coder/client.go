@@ -37,6 +37,7 @@ const (
 	maxErrorBody        = 64 << 10
 	maxPTYOutput        = 1 << 20
 	workspaceNamePrefix = "ao-"
+	bootstrapReady      = "__AO_BOOTSTRAP_READY__"
 	bootstrapOK         = "__AO_BOOTSTRAP_OK__"
 	bootstrapFailed     = "__AO_BOOTSTRAP_FAILED__"
 	bootstrapUploadACK  = "__AO_UPLOAD_ACK__"
@@ -48,6 +49,7 @@ const (
 	// Leave enough room for clock skew and request transit after AO computes the
 	// deadline but before Coder validates it.
 	coderDeadlineRequestMargin = time.Minute
+	bootstrapResultWait        = 2 * time.Minute
 )
 
 var userPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
@@ -65,13 +67,14 @@ type Config struct {
 
 // Client manages AO-owned workspaces through one dedicated Coder user.
 type Client struct {
-	baseURL    string
-	token      string
-	owner      string
-	templateID string
-	agentName  string
-	parameters map[string]string
-	http       *http.Client
+	baseURL               string
+	token                 string
+	owner                 string
+	templateID            string
+	agentName             string
+	parameters            map[string]string
+	expectedWorkspaceName string
+	http                  *http.Client
 }
 
 var (
@@ -94,7 +97,8 @@ func New(config Config) (*Client, error) {
 	if strings.TrimSpace(config.Owner) == "" {
 		return nil, errors.New("coder: workspace owner is required")
 	}
-	if _, err := uuid.Parse(strings.TrimSpace(config.TemplateID)); err != nil {
+	templateID, err := uuid.Parse(strings.TrimSpace(config.TemplateID))
+	if err != nil {
 		return nil, errors.New("coder: template ID must be a UUID")
 	}
 	httpClient := config.HTTPClient
@@ -113,11 +117,45 @@ func New(config Config) (*Client, error) {
 		baseURL:    strings.TrimRight(endpoint.String(), "/"),
 		token:      strings.TrimSpace(config.Token),
 		owner:      strings.TrimSpace(config.Owner),
-		templateID: strings.TrimSpace(config.TemplateID),
+		templateID: templateID.String(),
 		agentName:  strings.TrimSpace(config.AgentName),
 		parameters: parameters,
 		http:       httpClient,
 	}, nil
+}
+
+// ForSandbox binds the deployment-scoped connection credential to the
+// non-secret Coder contract stored on one session. The returned client is safe
+// to use only for that session's deterministic workspace identity.
+func (c *Client) ForSandbox(record domain.Sandbox) (sandbox.Provider, error) {
+	if strings.TrimSpace(record.SessionID) == "" {
+		return nil, errors.New("coder: durable session ID is required")
+	}
+	profile, err := sandbox.DecodeCoderSessionProfile(record.ResourceProfile)
+	if err != nil {
+		return nil, fmt.Errorf("coder: resolve durable session profile: %w", err)
+	}
+	if profile.BaseURL != c.baseURL {
+		return nil, fmt.Errorf(
+			"coder: durable session deployment %q does not match configured deployment %q",
+			profile.BaseURL, c.baseURL,
+		)
+	}
+	templateID, err := uuid.Parse(profile.TemplateID)
+	if err != nil {
+		return nil, errors.New("coder: durable session template ID must be a UUID")
+	}
+	parameters := make(map[string]string, len(profile.Parameters))
+	for name, value := range profile.Parameters {
+		parameters[name] = value
+	}
+	sessionClient := *c
+	sessionClient.owner = profile.Owner
+	sessionClient.templateID = templateID.String()
+	sessionClient.agentName = profile.AgentName
+	sessionClient.parameters = parameters
+	sessionClient.expectedWorkspaceName = WorkspaceName(record.SessionID)
+	return &sessionClient, nil
 }
 
 type workspace struct {
@@ -179,6 +217,12 @@ func (c *Client) Create(ctx context.Context, spec sandbox.Spec) (sandbox.Environ
 	if name == "" {
 		return sandbox.Environment{}, errors.New("coder: workspace name is required")
 	}
+	if c.expectedWorkspaceName != "" && name != c.expectedWorkspaceName {
+		return sandbox.Environment{}, fmt.Errorf(
+			"coder: session workspace name mismatch: got %q, want %q",
+			name, c.expectedWorkspaceName,
+		)
+	}
 	parameterNames := make([]string, 0, len(c.parameters))
 	for parameterName := range c.parameters {
 		parameterNames = append(parameterNames, parameterName)
@@ -196,6 +240,9 @@ func (c *Client) Create(ctx context.Context, spec sandbox.Spec) (sandbox.Environ
 	if err := c.do(ctx, http.MethodPost, "/api/v2/users/"+url.PathEscape(c.owner)+"/workspaces", body, &view); err != nil {
 		return sandbox.Environment{}, err
 	}
+	if err := c.validateWorkspaceIdentity(view, name); err != nil {
+		return sandbox.Environment{}, err
+	}
 	return c.toEnvironment(view), nil
 }
 
@@ -205,15 +252,27 @@ func (c *Client) Get(ctx context.Context, id sandbox.ID) (sandbox.Environment, e
 	if err := c.do(ctx, http.MethodGet, "/api/v2/workspaces/"+url.PathEscape(string(id)), nil, &view); err != nil {
 		return sandbox.Environment{}, err
 	}
+	if c.expectedWorkspaceName != "" {
+		if err := c.validateWorkspaceIdentity(view, c.expectedWorkspaceName); err != nil {
+			return sandbox.Environment{}, err
+		}
+	}
 	return c.toEnvironment(view), nil
 }
 
 // FindBySession recovers a workspace after a control-plane crash between
 // provider creation and persistence of the returned Coder workspace ID.
 func (c *Client) FindBySession(ctx context.Context, sessionID string) (sandbox.Environment, bool, error) {
+	expectedName := WorkspaceName(sessionID)
+	if c.expectedWorkspaceName != "" && expectedName != c.expectedWorkspaceName {
+		return sandbox.Environment{}, false, fmt.Errorf(
+			"coder: session workspace name mismatch: got %q, want %q",
+			expectedName, c.expectedWorkspaceName,
+		)
+	}
 	var view workspace
 	requestPath := "/api/v2/users/" + url.PathEscape(c.owner) + "/workspace/" +
-		url.PathEscape(WorkspaceName(sessionID))
+		url.PathEscape(expectedName)
 	err := c.do(ctx, http.MethodGet, requestPath, nil, &view)
 	if errors.Is(err, sandbox.ErrNotFound) {
 		return sandbox.Environment{}, false, nil
@@ -221,10 +280,32 @@ func (c *Client) FindBySession(ctx context.Context, sessionID string) (sandbox.E
 	if err != nil {
 		return sandbox.Environment{}, false, err
 	}
+	if err := c.validateWorkspaceIdentity(view, expectedName); err != nil {
+		return sandbox.Environment{}, false, err
+	}
 	if normalizeState(view.LatestBuild.Status) == sandbox.StateDeleted {
 		return sandbox.Environment{}, false, nil
 	}
 	return c.toEnvironment(view), true, nil
+}
+
+func (c *Client) validateWorkspaceIdentity(view workspace, expectedName string) error {
+	if view.Name != expectedName {
+		return fmt.Errorf(
+			"coder: workspace name mismatch: got %q, want %q", view.Name, expectedName,
+		)
+	}
+	if view.OwnerName != c.owner {
+		return fmt.Errorf(
+			"coder: workspace owner mismatch: got %q, want %q", view.OwnerName, c.owner,
+		)
+	}
+	if view.TemplateID != c.templateID {
+		return fmt.Errorf(
+			"coder: workspace template mismatch: got %q, want %q", view.TemplateID, c.templateID,
+		)
+	}
+	return nil
 }
 
 func (c *Client) Start(ctx context.Context, id sandbox.ID) error {
@@ -321,12 +402,28 @@ func (c *Client) selectAgent(view workspace) (workspaceAgent, bool) {
 // BootstrapWorker installs and starts AO through the Coder agent PTY. The
 // bootstrap archive travels as terminal input, so worker credentials never
 // appear in the Coder request URL, process arguments, or control-plane logs.
+//
+// The archive still carries the worker binary because the Coder workspace
+// template is customer-operated and external: this repo cannot bake ao-worker
+// into it. The launch environment written here already includes
+// AO_WORKER_EXPECTED_SHA256, so a baked coder worker self-heals to the control
+// plane's exact build. Eliminating the multi-megabyte stream (mirroring the
+// createos launch-baked path) is a fast-follow gated on the customer template
+// baking ao-worker at Destination; until then the stream remains the delivery
+// channel.
 func (c *Client) BootstrapWorker(ctx context.Context, id sandbox.ID, bootstrap sandbox.WorkerBootstrap) error {
 	if err := validateBootstrap(bootstrap); err != nil {
 		return err
 	}
 	var view workspace
 	if err := c.do(ctx, http.MethodGet, "/api/v2/workspaces/"+url.PathEscape(string(id)), nil, &view); err != nil {
+		return err
+	}
+	expectedName := c.expectedWorkspaceName
+	if expectedName == "" {
+		expectedName = WorkspaceName(bootstrap.DurableIdentity)
+	}
+	if err := c.validateWorkspaceIdentity(view, expectedName); err != nil {
 		return err
 	}
 	agent, ok := c.selectAgent(view)
@@ -348,11 +445,12 @@ func (c *Client) BootstrapWorker(ctx context.Context, id sandbox.ID, bootstrap s
 	query.Set("height", "40")
 	query.Set("command", command)
 	// Bootstrap is a short-lived, non-interactive command. The buffered backend
-	// lets the command finish after AO disconnects once the upload is accepted.
+	// preserves the final result after the upload while AO keeps the PTY open.
 	query.Set("backend_type", "buffered")
 	ptyURL.RawQuery = query.Encode()
+	const bootstrapAttempts = 5
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < bootstrapAttempts; attempt++ {
 		if err := c.bootstrapThroughPTY(ctx, ptyURL, encoded); err == nil {
 			return nil
 		} else {
@@ -360,6 +458,15 @@ func (c *Client) BootstrapWorker(ctx context.Context, id sandbox.ID, bootstrap s
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if attempt+1 < bootstrapAttempts {
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
 	return fmt.Errorf("coder: bootstrap worker after PTY retries: %w", lastErr)
@@ -384,50 +491,108 @@ func (c *Client) bootstrapThroughPTY(ctx context.Context, ptyURL *url.URL, encod
 		}
 		return fmt.Errorf("coder: open workspace PTY: %w", err)
 	}
-	defer conn.CloseNow()
-	netConn := websocket.NetConn(context.Background(), conn, websocket.MessageBinary)
-	defer netConn.Close()
+	streamCtx, stopStream := context.WithCancel(ctx)
+	netConn := websocket.NetConn(streamCtx, conn, websocket.MessageBinary)
+	output, outputDone := streamPTYOutput(streamCtx, netConn)
+	defer func() {
+		stopStream()
+		_ = conn.CloseNow()
+		<-outputDone
+	}()
 
+	if err := waitForBootstrapReady(ctx, output); err != nil {
+		return err
+	}
 	encoder := json.NewEncoder(netConn)
-	output := streamPTYOutput(netConn)
 	// Coder's reconnecting PTY writes each decoded Data field to the OS PTY but
 	// does not retry a short write. Frame the archive as canonical terminal lines
 	// with sequence and length metadata. The receiver acknowledges only a
 	// complete frame for the expected sequence; retrying an unacknowledged frame
 	// makes Coder's unreported short writes recoverable without tripling the
 	// shell work and exceeding the reconnecting-PTY lifetime.
-	const chunkSize = 3_000 // below the canonical terminal's 4 KiB line ceiling
+	const (
+		chunkSize    = 3_000 // below the canonical terminal's 4 KiB line ceiling
+		uploadWindow = 8     // bound PTY buffering while amortizing WAN round trips
+	)
 	sequence := 0
-	for offset := 0; offset < len(encoded); offset += chunkSize {
-		end := min(offset+chunkSize, len(encoded))
-		chunk := encoded[offset:end]
-		line := fmt.Sprintf("data:%d:%d:%s\n", sequence, len(chunk), chunk)
-		wanted := fmt.Sprintf("%s:%d", bootstrapUploadACK, sequence+1)
-		if err := sendBootstrapFrame(ctx, encoder, output, line, wanted); err != nil {
+	for offset := 0; offset < len(encoded); {
+		frames := make([]string, 0, uploadWindow)
+		for len(frames) < uploadWindow && offset < len(encoded) {
+			end := min(offset+chunkSize, len(encoded))
+			chunk := encoded[offset:end]
+			frames = append(frames, fmt.Sprintf("data:%d:%d:%s\n", sequence, len(chunk), chunk))
+			sequence++
+			offset = end
+		}
+		wanted := fmt.Sprintf("%s:%d", bootstrapUploadACK, sequence)
+		if err := sendBootstrapWindow(ctx, encoder, output, frames, wanted); err != nil {
 			return err
 		}
-		sequence++
 	}
-	return sendBootstrapFrame(ctx, encoder, output,
-		fmt.Sprintf("done:%d:0:\n", sequence), bootstrapUploadDone)
+	if err := sendBootstrapWindow(ctx, encoder, output,
+		[]string{fmt.Sprintf("done:%d:0:\n", sequence)}, bootstrapUploadDone); err != nil {
+		return err
+	}
+	result, err := readBootstrapResult(ctx, output, bootstrapResultWait)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(result, bootstrapOK) {
+		return nil
+	}
+	return fmt.Errorf("coder: worker bootstrap failed: %s", sanitizePTYOutput(result))
 }
 
-func sendBootstrapFrame(
+func waitForBootstrapReady(ctx context.Context, output <-chan ptyOutput) error {
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return errors.New("coder: workspace PTY did not become ready for worker upload")
+		case response, ok := <-output:
+			if !ok {
+				return errors.New("coder: workspace PTY closed before worker upload was ready")
+			}
+			if strings.Contains(response.data, bootstrapReady) {
+				return nil
+			}
+			if strings.Contains(response.data, bootstrapFailed) {
+				return fmt.Errorf("coder: worker bootstrap failed before upload: %s", sanitizePTYOutput(response.data))
+			}
+			if response.err != nil {
+				return fmt.Errorf("coder: read workspace PTY before worker upload: %w", response.err)
+			}
+		}
+	}
+}
+
+// sendBootstrapWindow pipelines a bounded group of canonical PTY lines, then
+// waits for the receiver's cumulative acknowledgement. If Coder short-writes a
+// frame, replaying the whole window is safe: the shell ignores already-accepted
+// sequence numbers, accepts the first missing one, and then continues through
+// the replayed suffix. This retains the upload's loss recovery without paying
+// one WAN round trip per 3 KiB frame.
+func sendBootstrapWindow(
 	ctx context.Context,
 	encoder *json.Encoder,
 	output <-chan ptyOutput,
-	line string,
+	lines []string,
 	wanted string,
 ) error {
 	const (
-		maxAttempts = 6
+		maxAttempts = 12
 		ackTimeout  = 2 * time.Second
 	)
 	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if err := encoder.Encode(struct {
-			Data string `json:"data"`
-		}{Data: line}); err != nil {
-			return fmt.Errorf("coder: upload worker through PTY: %w", err)
+		for _, line := range lines {
+			if err := encoder.Encode(struct {
+				Data string `json:"data"`
+			}{Data: line}); err != nil {
+				return fmt.Errorf("coder: upload worker through PTY: %w", err)
+			}
 		}
 		timer := time.NewTimer(ackTimeout)
 		for {
@@ -440,9 +605,12 @@ func sendBootstrapFrame(
 			case response, ok := <-output:
 				if !ok {
 					timer.Stop()
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 					return errors.New("coder: workspace PTY closed during worker upload")
 				}
-				if strings.Contains(response.data, wanted) {
+				if strings.TrimSpace(response.data) == wanted {
 					timer.Stop()
 					return nil
 				}
@@ -458,7 +626,7 @@ func sendBootstrapFrame(
 		}
 	retry:
 	}
-	return errors.New("coder: workspace PTY repeatedly dropped an upload frame")
+	return errors.New("coder: workspace PTY repeatedly dropped an upload window")
 }
 
 func validateBootstrap(bootstrap sandbox.WorkerBootstrap) error {
@@ -473,6 +641,15 @@ func validateBootstrap(bootstrap sandbox.WorkerBootstrap) error {
 	}
 	if !userPattern.MatchString(strings.TrimSpace(bootstrap.User)) {
 		return fmt.Errorf("coder: worker user %q is invalid", bootstrap.User)
+	}
+	if _, err := sandbox.NewCoderWorkspaceLayout(bootstrap.DurableRoot); err != nil {
+		return fmt.Errorf("coder: durable workspace root: %w", err)
+	}
+	identity := strings.TrimSpace(bootstrap.DurableIdentity)
+	if identity == "" || len(identity) > 200 || strings.IndexFunc(identity, func(character rune) bool {
+		return character < ' ' || character == 0x7f
+	}) >= 0 {
+		return errors.New("coder: durable workspace identity is invalid")
 	}
 	for key := range bootstrap.Environment {
 		if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(key) {
@@ -498,7 +675,7 @@ func bootstrapArchive(bootstrap sandbox.WorkerBootstrap) ([]byte, error) {
 	}{
 		{name: "ao-worker", mode: 0o700, data: bootstrap.Binary},
 		{name: "worker.env", mode: 0o600, data: []byte(environmentFile(bootstrap.Environment))},
-		{name: "launch.sh", mode: 0o700, data: []byte("#!/bin/sh\nset -eu\nset -a\n. \"$1\"\nset +a\nrm -f \"$1\"\nexec \"$2\"\n")},
+		{name: "launch.sh", mode: 0o700, data: []byte("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$$\" >\"$3\"\nset -a\n. \"$1\"\nset +a\nrm -f \"$1\"\nexec \"$2\"\n")},
 	}
 	if len(bootstrap.HelperBinary) > 0 {
 		files = append(files, struct {
@@ -543,29 +720,60 @@ func environmentFile(environment map[string]string) string {
 func bootstrapCommand(bootstrap sandbox.WorkerBootstrap, encodedLength int) string {
 	workerUser := strings.TrimSpace(bootstrap.User)
 	workerDestination := strings.TrimSpace(bootstrap.Destination)
+	layout, _ := sandbox.NewCoderWorkspaceLayout(bootstrap.DurableRoot)
+	requireIdentity := "0"
+	if bootstrap.RequireDurableIdentity {
+		requireIdentity = "1"
+	}
 	helperInstall := ""
 	if len(bootstrap.HelperBinary) > 0 {
 		helperInstall = "sudo -n install -m 0755 \"$stage/ao\" " + shellQuote(bootstrap.HelperDestination) + "\n"
 	}
+	workerEnvironment := path.Join(layout.WorkerData, "worker.env")
+	workerLauncher := path.Join(layout.WorkerData, "launch.sh")
+	workerLog := path.Join(layout.WorkerData, "worker.log")
+	workerPID := path.Join(layout.WorkerData, "worker.pid")
 	script := "set -eu\n" +
 		"stage=$(mktemp -d)\nencoded=\"$stage/payload.b64\"\n" +
 		"trap 'code=$?; stty echo icanon 2>/dev/null || true; echo " + bootstrapFailed + ":$code' EXIT\n" +
-		"target=" + strconv.Itoa(encodedLength) + "\nexpected=0\nreceived=0\n: >\"$encoded\"\nstty -echo icanon\n" +
+		"target=" + strconv.Itoa(encodedLength) + "\nexpected=0\nreceived=0\n: >\"$encoded\"\nstty -echo icanon 2>/dev/null || true\necho " + bootstrapReady + "\n" +
 		"while IFS=: read -r kind sequence declared chunk; do\n" +
 		"  case \"$sequence\" in ''|*[!0-9]*) continue ;; esac\n" +
 		"  case \"$declared\" in ''|*[!0-9]*) continue ;; esac\n" +
 		"  if [ \"$kind\" = data ] && [ \"$sequence\" -eq \"$expected\" ] && [ \"${#chunk}\" -eq \"$declared\" ] && [ $((received + declared)) -le \"$target\" ]; then\n" +
 		"    printf %s \"$chunk\" >>\"$encoded\"\n    received=$((received + declared))\n    expected=$((expected + 1))\n    echo " + bootstrapUploadACK + ":$expected\n" +
-		"  elif [ \"$kind\" = done ] && [ \"$received\" -eq \"$target\" ]; then\n    echo " + bootstrapUploadDone + "\n    break\n  fi\ndone\nstty echo icanon\n" +
+		"  elif [ \"$kind\" = done ] && [ \"$received\" -eq \"$target\" ]; then\n    echo " + bootstrapUploadDone + "\n    break\n  fi\ndone\nstty echo icanon 2>/dev/null || true\n" +
 		"base64 -d \"$encoded\" | gzip -d | tar -xf - -C \"$stage\"\n" +
 		"sudo -n id -u " + shellQuote(workerUser) + " >/dev/null 2>&1 || sudo -n useradd -m " + shellQuote(workerUser) + "\n" +
-		"sudo -n mkdir -p /workspace/repository /workspace/.ao/worker /workspace/.ao/harness /workspace/.ao/repository-credentials\n" +
-		"sudo -n chown -R " + shellQuote(workerUser+":"+workerUser) + " /workspace\n" +
+		"durable_root=" + shellQuote(layout.DurableRoot) + "\n" +
+		"if [ ! -d \"$durable_root\" ] || [ -L \"$durable_root\" ] || ! mountpoint -q \"$durable_root\"; then\n" +
+		"  echo 'configured Coder durable root is not a mounted directory' >&2\n  exit 1\nfi\n" +
+		"sudo -n chmod o+x \"$durable_root\"\n" +
+		"sudo -n mkdir -p " + shellQuote(layout.Repository) + " " + shellQuote(layout.WorkerData) + " " +
+		shellQuote(layout.Home) + " " + shellQuote(layout.ClaudeConfig) + " " + shellQuote(layout.CodexHome) + "\n" +
+		"identity_file=" + shellQuote(layout.DurableIdentity) + "\n" +
+		"if sudo -n test -f \"$identity_file\"; then\n" +
+		"  existing_identity=$(sudo -n cat \"$identity_file\")\n" +
+		"  if [ \"$existing_identity\" != " + shellQuote(strings.TrimSpace(bootstrap.DurableIdentity)) + " ]; then\n" +
+		"    echo 'Coder durable root belongs to a different AO session' >&2\n    exit 1\n  fi\n" +
+		"elif [ " + requireIdentity + " -eq 1 ]; then\n" +
+		"  echo 'Coder durable state did not survive workspace stop/start' >&2\n  exit 1\n" +
+		"else\n" +
+		"  printf '%s\\n' " + shellQuote(strings.TrimSpace(bootstrap.DurableIdentity)) + " | sudo -n tee \"$identity_file\" >/dev/null\nfi\n" +
+		"sudo -n chown -R " + shellQuote(workerUser+":"+workerUser) + " " + shellQuote(layout.Repository) + " " + shellQuote(path.Dir(layout.WorkerData)) + "\n" +
 		"sudo -n install -m 0755 \"$stage/ao-worker\" " + shellQuote(workerDestination) + "\n" + helperInstall +
-		"sudo -n install -o " + shellQuote(workerUser) + " -g " + shellQuote(workerUser) + " -m 0600 \"$stage/worker.env\" /workspace/.ao/worker/worker.env\n" +
-		"sudo -n install -o " + shellQuote(workerUser) + " -g " + shellQuote(workerUser) + " -m 0700 \"$stage/launch.sh\" /workspace/.ao/worker/launch.sh\n" +
+		"sudo -n install -o " + shellQuote(workerUser) + " -g " + shellQuote(workerUser) + " -m 0600 \"$stage/worker.env\" " + shellQuote(workerEnvironment) + "\n" +
+		"sudo -n install -o " + shellQuote(workerUser) + " -g " + shellQuote(workerUser) + " -m 0700 \"$stage/launch.sh\" " + shellQuote(workerLauncher) + "\n" +
 		"sudo -n pkill -u " + shellQuote(workerUser) + " -f " + shellQuote(workerDestination) + " 2>/dev/null || true\n" +
-		"sudo -n -u " + shellQuote(workerUser) + " sh -c " + shellQuote("nohup /workspace/.ao/worker/launch.sh /workspace/.ao/worker/worker.env "+shellQuote(workerDestination)+" >/workspace/.ao/worker/worker.log 2>&1 </dev/null &") + "\n" +
+		"sudo -n install -o " + shellQuote(workerUser) + " -g " + shellQuote(workerUser) + " -m 0600 /dev/null " + shellQuote(workerLog) + "\n" +
+		"sudo -n install -o " + shellQuote(workerUser) + " -g " + shellQuote(workerUser) + " -m 0600 /dev/null " + shellQuote(workerPID) + "\n" +
+		"sudo -n -b -u " + shellQuote(workerUser) + " sh -c " + shellQuote("exec nohup "+shellQuote(workerLauncher)+" "+shellQuote(workerEnvironment)+" "+shellQuote(workerDestination)+" "+shellQuote(workerPID)+" >"+shellQuote(workerLog)+" 2>&1 </dev/null") + "\n" +
+		"attempt=0\nworker_pid=\nwhile [ \"$attempt\" -lt 5 ]; do\n" +
+		"  if sudo -n test -s " + shellQuote(workerPID) + "; then worker_pid=$(sudo -n cat " + shellQuote(workerPID) + "); fi\n" +
+		"  case \"$worker_pid\" in ''|*[!0-9]*) ;; *) if sudo -n -u " + shellQuote(workerUser) + " kill -0 \"$worker_pid\" 2>/dev/null; then break; fi ;; esac\n" +
+		"  worker_pid=\nattempt=$((attempt + 1))\nsleep 1\ndone\n" +
+		"case \"$worker_pid\" in ''|*[!0-9]*) echo 'AO worker did not start' >&2; exit 1 ;; esac\n" +
+		"sleep 1\nsudo -n -u " + shellQuote(workerUser) + " kill -0 \"$worker_pid\" 2>/dev/null || { echo 'AO worker exited during startup' >&2; exit 1; }\n" +
 		"rm -rf \"$stage\"\ntrap - EXIT\necho " + bootstrapOK + "\n"
 	return "sh -lc " + shellQuote(script)
 }
@@ -579,9 +787,11 @@ type ptyOutput struct {
 	err  error
 }
 
-func streamPTYOutput(reader io.Reader) <-chan ptyOutput {
+func streamPTYOutput(ctx context.Context, reader io.Reader) (<-chan ptyOutput, <-chan struct{}) {
 	result := make(chan ptyOutput)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		defer close(result)
 		buffered := bufio.NewReader(reader)
 		total := 0
@@ -589,23 +799,34 @@ func streamPTYOutput(reader io.Reader) <-chan ptyOutput {
 			line, err := buffered.ReadString('\n')
 			total += len(line)
 			if line != "" || err != nil {
-				result <- ptyOutput{data: line, err: err}
+				select {
+				case result <- ptyOutput{data: line, err: err}:
+				case <-ctx.Done():
+					return
+				}
 			}
 			if err != nil {
 				return
 			}
 		}
-		result <- ptyOutput{err: errors.New("coder: PTY output exceeded limit")}
+		select {
+		case result <- ptyOutput{err: errors.New("coder: PTY output exceeded limit")}:
+		case <-ctx.Done():
+		}
 	}()
-	return result
+	return result, done
 }
 
-func readBootstrapResult(ctx context.Context, output <-chan ptyOutput) (string, error) {
+func readBootstrapResult(ctx context.Context, output <-chan ptyOutput, timeout time.Duration) (string, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	var result strings.Builder
 	for {
 		select {
 		case <-ctx.Done():
 			return result.String(), ctx.Err()
+		case <-timer.C:
+			return result.String(), errors.New("coder: workspace PTY did not report the worker bootstrap result")
 		case value, ok := <-output:
 			if !ok {
 				return result.String(), io.EOF

@@ -37,8 +37,10 @@ import { useRestoreSession } from "../hooks/useRestoreSession";
 import { useShellTerminals } from "../hooks/useShellTerminals";
 import { useCloudCp } from "../hooks/useCloudCp";
 import { createCloudTerminalMux } from "../lib/cloud-terminal-mux";
+import { subscribeSessionEventsBridged } from "../lib/cloud-cp/stream-bridge";
 import { XtermTerminal } from "./XtermTerminal";
 import { RestoreUnavailableDialog } from "./RestoreUnavailableDialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 type TerminalPaneProps = {
 	session?: WorkspaceSession;
@@ -50,11 +52,17 @@ type TerminalPaneProps = {
 	onChangeFontSize?: (delta: number) => void;
 	isFullscreen?: boolean;
 	/** Enter or exit fullscreen for the terminal pane that owns this xterm. */
-	onToggleFullscreen?: () => void;
+	onToggleFullscreen?: () => void | Promise<void>;
 	/** Refuse agent PTY input while a controller transition owns the source. */
 	inputDisabled?: boolean;
 	/** Focus the terminal when an in-flight controller asks for human input. */
 	focusRequested?: boolean;
+	/** Observe attachment state without taking ownership of the terminal lifecycle. */
+	onTerminalStateChange?: (state: TerminalSessionState) => void;
+	/** One-shot input initiated by an explicit UI action. */
+	inputRequest?: { id: number; data: string };
+	/** Reports whether the active attachment accepted a one-shot input request. */
+	onInputRequestResult?: (id: number, accepted: boolean) => void;
 	/** Provider-owned shared transport lease factory. */
 	createMux?: () => TerminalMux;
 };
@@ -70,7 +78,7 @@ type TerminalCacheDescriptor = {
 
 type CachedTerminalEntry = TerminalCacheDescriptor & {
 	activationId: number;
-	activationPhase: "parked" | "preparing" | "ready" | "revealed" | "visible";
+	activationPhase: "parked" | "visible";
 	container: HTMLDivElement;
 	discardOnDeactivate?: boolean;
 	props: TerminalPaneProps;
@@ -118,6 +126,9 @@ function terminalPropsMatch(left: TerminalPaneProps, right: TerminalPaneProps): 
 		left.onToggleFullscreen === right.onToggleFullscreen &&
 		left.inputDisabled === right.inputDisabled &&
 		left.focusRequested === right.focusRequested &&
+		left.onTerminalStateChange === right.onTerminalStateChange &&
+		left.inputRequest === right.inputRequest &&
+		left.onInputRequestResult === right.onInputRequestResult &&
 		left.createMux === right.createMux &&
 		terminalTargetMatches(left.terminalTarget, right.terminalTarget)
 	);
@@ -146,8 +157,10 @@ function cacheDescriptor(
 	const handleId = session?.terminalHandleId;
 	if (!session?.id || !handleId) return null;
 	const ownerKey = `session:${session.id}:worker`;
+	const generation = session.terminalGeneration ?? "";
 	return {
-		cacheKey: `${ownerKey}|handle:${handleId}`,
+		cacheKey: `${ownerKey}|handle:${handleId}|generation:${generation}`,
+		generation,
 		handleId,
 		kind: "worker",
 		ownerKey,
@@ -173,7 +186,6 @@ function setTerminalPhase(
 	entry.activationPhase = phase;
 	entry.container.dataset.terminalActivationPhase = phase;
 	const interactive = phase === "visible";
-	const rendered = phase === "revealed" || interactive;
 	entry.container.inert = !interactive;
 	if (interactive) {
 		entry.container.removeAttribute("aria-hidden");
@@ -182,7 +194,7 @@ function setTerminalPhase(
 		entry.container.setAttribute("aria-hidden", "true");
 		entry.container.style.pointerEvents = "none";
 	}
-	if (rendered) {
+	if (interactive) {
 		entry.container.style.visibility = "";
 	} else {
 		entry.container.style.visibility = "hidden";
@@ -201,39 +213,23 @@ function parkTerminal(entry: CachedTerminalEntry, parking: HTMLDivElement): void
 
 function showTerminal(entry: CachedTerminalEntry, slot: HTMLDivElement): void {
 	entry.activationId += 1;
-	// A retained renderer already has the latest hidden output. Prepare it at the
-	// bottom while hidden so returning to a worker never exposes the historical
-	// viewport the user happened to leave behind.
-	setTerminalPhase(entry, entry.terminal ? "preparing" : "visible");
-	if (entry.activationPhase === "visible") entry.container.style.visibility = "";
+	// Do not hide a retained terminal while it crosses xterm's two paint-frame
+	// preparation cycle: that made every return to a tab flash blank.
+	setTerminalPhase(entry, "visible");
 	entry.container.style.width = "100%";
 	entry.container.style.height = "100%";
 	slot.appendChild(entry.container);
-}
-
-function revealTerminal(entry: CachedTerminalEntry): void {
-	setTerminalPhase(entry, "revealed");
-}
-
-function activateTerminal(entry: CachedTerminalEntry): void {
-	setTerminalPhase(entry, "visible");
 }
 
 function CachedTerminalPortal({
 	active,
 	entry,
 	onFatal,
-	onPrepared,
-	onReveal,
-	onActivated,
 	onTerminalReady,
 }: {
 	active: boolean;
 	entry: CachedTerminalEntry;
 	onFatal: (cacheKey: string, message: string) => void;
-	onPrepared: (cacheKey: string, activationId: number) => void;
-	onReveal: (cacheKey: string, activationId: number) => void;
-	onActivated: (cacheKey: string, activationId: number) => void;
 	onTerminalReady: (cacheKey: string, terminal: AttachableTerminal) => void;
 }) {
 	const handleFatal = useCallback(
@@ -248,41 +244,17 @@ function CachedTerminalPortal({
 	);
 	useLayoutEffect(() => {
 		const terminal = entry.terminal;
-		if (!active || entry.activationPhase !== "preparing" || !terminal) return;
-		const activationId = entry.activationId;
-		let current = true;
-		void terminal.prepareForActivation().then(() => {
-			if (current) onPrepared(entry.cacheKey, activationId);
-		});
-		return () => {
-			current = false;
-		};
+		if (!active || entry.activationPhase !== "visible" || !terminal) return;
+		// Fit and scroll after the host is visible. This retains the cache's
+		// settled viewport behavior without putting a blank frame in front of it.
+		void terminal.prepareForActivation();
 	}, [
 		active,
 		entry,
 		entry.activationId,
 		entry.activationPhase,
 		entry.terminal,
-		onPrepared,
 	]);
-	useLayoutEffect(() => {
-		if (!active || entry.activationPhase !== "ready") return;
-		onReveal(entry.cacheKey, entry.activationId);
-	}, [active, entry, entry.activationId, entry.activationPhase, onReveal]);
-	useLayoutEffect(() => {
-		if (!active || entry.activationPhase !== "revealed") return;
-		const activationId = entry.activationId;
-		let paintFrame: number | null = null;
-		const revealFrame = requestAnimationFrame(() => {
-			paintFrame = requestAnimationFrame(() => {
-				onActivated(entry.cacheKey, activationId);
-			});
-		});
-		return () => {
-			cancelAnimationFrame(revealFrame);
-			if (paintFrame !== null) cancelAnimationFrame(paintFrame);
-		};
-	}, [active, entry, entry.activationId, entry.activationPhase, onActivated]);
 	return createPortal(
 		<AttachedTerminal
 			{...entry.props}
@@ -347,16 +319,46 @@ export function TerminalCacheProvider({
 			if (cached) return cached;
 			const sessionId = paneSession.id;
 			const orgId = cloud.orgId;
+			// One replay cursor per pane, shared across every mux the hook rebuilds
+			// on reconnect (the factory closure captures it and is itself cached
+			// per factoryKey). A rebuilt mux resumes from the last sequence it
+			// received instead of replaying the whole scrollback from 0, so the
+			// terminal settles instead of flickering. A different pane gets a
+			// different factory and therefore its own cursor starting at 0.
+			const cursor = { value: 0 };
 			const factory = () =>
 				createCloudTerminalMux({
 					wsBaseUrl: `${cloudCpRef.current.baseUrl.replace(/^http/i, "ws").replace(/\/+$/, "")}/api/cloud/v1`,
 					kind,
-					mintTicket: async () => {
+					cursor,
+					// #4960: hold the agent pane in "connecting" until the worker's
+					// agent.ready arrives (do not flash the temporary workspace shell).
+					// A workspace/shell terminal attaches to its own kind immediately
+					// and must never be upgraded to the agent terminal, so gate both
+					// the wait and the agent-ready subscription on the agent pane.
+					waitForAgentReady: kind === "agent",
+					mintTicket: async (ticketKind) => {
 						const response = await cloudCpRef.current.client.createTerminalTicket(orgId, sessionId, {
-							kind,
+							kind: ticketKind,
 						});
 						return response.ticket;
 					},
+					subscribeAgentReady:
+						kind === "agent"
+							? (onReady) => {
+									const controller = new AbortController();
+									void subscribeSessionEventsBridged({
+										baseUrl: cloudCpRef.current.baseUrl,
+										orgId,
+										sessionId,
+										signal: controller.signal,
+										onEvent: (event) => {
+											if (event.type === "agent.ready") onReady();
+										},
+									});
+									return () => controller.abort();
+								}
+							: undefined,
 				});
 			cloudMuxFactoriesRef.current.set(factoryKey, factory);
 			return factory;
@@ -497,57 +499,6 @@ export function TerminalCacheProvider({
 		[rerender],
 	);
 
-	const markPrepared = useCallback(
-		(cacheKey: string, activationId: number) => {
-			const entry = entriesRef.current.get(cacheKey);
-			if (
-				!entry ||
-				entry.activationId !== activationId ||
-				entry.activationPhase !== "preparing" ||
-				activeRef.current?.key !== cacheKey
-			) {
-				return;
-			}
-			setTerminalPhase(entry, "ready");
-			rerender();
-		},
-		[rerender],
-	);
-
-	const markReveal = useCallback(
-		(cacheKey: string, activationId: number) => {
-			const entry = entriesRef.current.get(cacheKey);
-			if (
-				!entry ||
-				entry.activationId !== activationId ||
-				entry.activationPhase !== "ready" ||
-				activeRef.current?.key !== cacheKey
-			) {
-				return;
-			}
-			revealTerminal(entry);
-			rerender();
-		},
-		[rerender],
-	);
-
-	const markActivated = useCallback(
-		(cacheKey: string, activationId: number) => {
-			const entry = entriesRef.current.get(cacheKey);
-			if (
-				!entry ||
-				entry.activationId !== activationId ||
-				entry.activationPhase !== "revealed" ||
-				activeRef.current?.key !== cacheKey
-			) {
-				return;
-			}
-			activateTerminal(entry);
-			rerender();
-		},
-		[rerender],
-	);
-
 	// Daemon readiness and theme are shell-wide. Parked entries must observe
 	// them too so reconnect and rendering behavior never depends on the route
 	// that happened to be active when they were parked.
@@ -580,7 +531,8 @@ export function TerminalCacheProvider({
 			if (
 				entry.kind === "worker" &&
 				session &&
-				session.terminalHandleId !== entry.handleId
+				(session.terminalHandleId !== entry.handleId ||
+					(session.terminalGeneration ?? "") !== (entry.generation ?? ""))
 			) {
 				removeEntry(entry.cacheKey);
 				continue;
@@ -655,10 +607,7 @@ export function TerminalCacheProvider({
 					active={activeRef.current?.key === entry.cacheKey}
 					entry={entry}
 					key={entry.cacheKey}
-					onActivated={markActivated}
 					onFatal={markFatal}
-					onPrepared={markPrepared}
-					onReveal={markReveal}
 					onTerminalReady={markTerminalReady}
 				/>
 			))}
@@ -701,17 +650,23 @@ export function TerminalPane({
 	onToggleFullscreen,
 	inputDisabled,
 	focusRequested,
+	onTerminalStateChange,
+	inputRequest,
+	onInputRequestResult,
 }: TerminalPaneProps) {
+	const { t } = useTranslation();
 	const terminalTarget =
 		requestedTerminalTarget &&
 		terminalTargetBelongsToSession(requestedTerminalTarget, session?.id)
 			? requestedTerminalTarget
 			: ({ kind: "worker" } satisfies TerminalTarget);
+	const isOptimisticShell =
+		terminalTarget.kind === "shell" && terminalTarget.handleId.startsWith("pending-shell:");
 	const cache = useContext(TerminalCacheContext);
 	const terminalKey =
 		terminalTarget?.kind === "reviewer" || terminalTarget?.kind === "shell"
 			? terminalTarget.handleId
-			: (session?.terminalHandleId ?? "empty");
+			: `${session?.terminalHandleId ?? "empty"}:${session?.terminalGeneration ?? ""}`;
 
 	if (!window.ao) {
 		// A standalone shell has no agent and no branch, so it previews as a plain
@@ -763,6 +718,19 @@ export function TerminalPane({
 			</pre>
 		);
 	}
+	// The tab is intentionally selected before the daemon allocates its handle.
+	// Keep that short bridge visually indistinguishable from an empty terminal,
+	// rather than surfacing a separate loading state or attaching xterm to a
+	// handle that cannot exist yet.
+	if (isOptimisticShell) {
+		return (
+			<div
+				aria-label={t("terminal.shellAria")}
+				className="terminal-surface h-full"
+				data-testid="optimistic-terminal"
+			/>
+		);
+	}
 
 	const props = {
 		session,
@@ -775,6 +743,9 @@ export function TerminalPane({
 		onToggleFullscreen,
 		inputDisabled,
 		focusRequested,
+		onTerminalStateChange,
+		inputRequest,
+		onInputRequestResult,
 	};
 	const descriptor = cacheDescriptor(session, terminalTarget);
 	if (cache && descriptor) {
@@ -793,6 +764,9 @@ export function TerminalPane({
 			onChangeFontSize={onChangeFontSize}
 			onToggleFullscreen={onToggleFullscreen}
 			focusRequested={focusRequested}
+			onTerminalStateChange={onTerminalStateChange}
+			inputRequest={inputRequest}
+			onInputRequestResult={onInputRequestResult}
 			terminalTarget={terminalTarget}
 		/>
 	);
@@ -952,6 +926,9 @@ function AttachedTerminal({
 	onToggleFullscreen,
 	inputDisabled,
 	focusRequested,
+	onTerminalStateChange,
+	inputRequest,
+	onInputRequestResult,
 	createMux,
 	isVisible = true,
 	onFatal,
@@ -963,13 +940,16 @@ function AttachedTerminal({
 }) {
 	const { t } = useTranslation();
 	const attachSession =
-		session && terminalTarget?.kind === "reviewer"
+		terminalTarget?.kind === "shell"
+			? undefined
+			: session && terminalTarget?.kind === "reviewer"
 			? { ...session, terminalHandleId: terminalTarget.handleId }
 			: session;
 	// One terminal instance per logical-terminal + handle generation. The shell
 	// cache retains this component across route switches; a replacement handle
 	// gets a new component rather than inheriting stale screen/input state.
 	const [terminal, setTerminal] = useState<AttachableTerminal | null>(null);
+	const lastInputRequestIdRef = useRef<number | null>(null);
 	const [initFailed, setInitFailed] = useState(false);
 	const [isRestoring, setIsRestoring] = useState(false);
 	const [restoreError, setRestoreError] = useState<string | undefined>();
@@ -981,12 +961,25 @@ function AttachedTerminal({
 	const shellTerminalHandleId = terminalTarget?.kind === "shell" ? terminalTarget.handleId : undefined;
 	const { attach, state, error, replaySettled, hasAttached, syncVisibleSize } = useTerminalSession(attachSession, {
 		coverInitialReplay: terminalTarget?.kind !== "reviewer",
+		// Cloud workers can acknowledge a terminal before the coding agent emits
+		// its first screen. Keep the loading surface visible through that gap.
+		waitForInitialOutput: Boolean(attachSession?.cloud),
 		createMux,
 		daemonReady,
 		inputDisabled,
 		isVisible,
 		shellTerminalHandleId,
 	});
+	useEffect(() => {
+		onTerminalStateChange?.(state);
+	}, [onTerminalStateChange, state]);
+	useEffect(() => {
+		if (!terminal || state !== "attached" || !inputRequest) return;
+		if (lastInputRequestIdRef.current === inputRequest.id) return;
+		const accepted = terminal.sendUserInput(inputRequest.data);
+		if (accepted) lastInputRequestIdRef.current = inputRequest.id;
+		onInputRequestResult?.(inputRequest.id, accepted);
+	}, [inputRequest, onInputRequestResult, state, terminal]);
 	// xterm's write callback means the replay has been parsed, not that the
 	// browser has painted its final viewport. Keep the first-load cover mounted
 	// through the same render/paint preparation used when activating a retained
@@ -1008,6 +1001,11 @@ function AttachedTerminal({
 		};
 	}, [replayPaintPending, replaySettled, terminal]);
 	const handleId = shellTerminalHandleId ?? attachSession?.terminalHandleId;
+	const handleRetry = useCallback(() => {
+		// Re-attach from scratch: resets the connect-failure counter and starts a
+		// fresh connection attempt once the user has fixed their network policy.
+		if (terminal) attach(terminal);
+	}, [attach, terminal]);
 	const provider = terminalTarget?.kind === "reviewer" ? terminalTarget.harness : session?.provider;
 	const isSessionActive = session ? sessionIsActive(session) : false;
 	// A standalone shell is never restorable: there is no session row to restore.
@@ -1030,9 +1028,10 @@ function AttachedTerminal({
 	useEffect(() => {
 		if (initFailed) {
 			onFatal?.("renderer initialization failed");
+			onTerminalStateChange?.("error");
 			return;
 		}
-	}, [initFailed, onFatal]);
+	}, [initFailed, onFatal, onTerminalStateChange]);
 	const handleLinkOpen = useSessionBrowserLink(session);
 	const restoreSession = useCallback(async () => {
 		if (!session?.id || !canRestoreSession || isRestoring) return;
@@ -1080,7 +1079,17 @@ function AttachedTerminal({
 		);
 	}
 
-	const banner = bannerText(state, t, hasAttached, Boolean(attachSession?.cloud), error);
+	// A cloud pane that hit the connect-failure breaker (ticket minted but the
+	// WebSocket kept failing) shows a dedicated retryable overlay instead of the
+	// generic banner. Any other error (PTY crash, pane error) keeps the banner.
+	const isCloudConnectError =
+		state === "error" &&
+		Boolean(attachSession?.cloud) &&
+		!hasAttached &&
+		Boolean(error?.includes("WebSocket cannot connect"));
+	const banner = isCloudConnectError
+		? undefined
+		: bannerText(state, t, hasAttached, Boolean(attachSession?.cloud), error);
 	const showEmptyState = !handleId;
 	// Cover xterm while the attachment buffers the initial replay, so the pane
 	// appears already drawn at the tail instead of visibly scrolling down to it.
@@ -1146,7 +1155,8 @@ function AttachedTerminal({
 						</div>
 					</div>
 				)}
-				{showReplayCover && <ReplayCover />}
+				{showReplayCover && <ReplayCover message={attachSession?.cloud ? t("terminal.connecting") : undefined} />}
+				{isCloudConnectError && <CloudConnectError onRetry={handleRetry} />}
 				{banner && (
 					<div className="absolute inset-x-3 top-2 rounded-md border border-border bg-surface/95 px-3 py-1.5 font-mono text-caption text-muted-foreground">
 						{banner}
@@ -1167,16 +1177,43 @@ function AttachedTerminal({
 	);
 }
 
-function ReplayCover() {
+// Shown when a cloud terminal ticket was issued but the WebSocket permanently
+// failed to connect (proxy/firewall/CSP block). Distinct from a PTY error: it
+// is recoverable, so the user can retry once their network policy is fixed
+// without a full page reload.
+function CloudConnectError({ onRetry }: { onRetry: () => void }) {
+	const { t } = useTranslation();
 	return (
-		// Keep this cover silent: its only job is to hide the initial replay's
-		// intermediate paints. xterm remains live underneath, and pointer events
-		// pass through so selection and wheel input never wait on attachment.
+		<div className="absolute inset-0 z-10 grid place-items-center bg-terminal-opaque pointer-events-auto">
+			<div className="flex max-w-sm flex-col items-center gap-4 rounded-lg border border-border bg-surface p-6 text-center shadow-lg">
+				<div className="font-mono text-sm font-medium text-foreground">{t("terminal.cloudConnectTitle")}</div>
+				<div className="text-xs leading-relaxed text-muted-foreground">{t("terminal.cloudConnectDescription")}</div>
+				<button
+					type="button"
+					id="cloud-terminal-retry"
+					className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border bg-raised px-3 py-1.5 font-mono text-xs text-foreground transition hover:bg-interactive-hover"
+					onClick={onRetry}
+				>
+					<RotateCcw className="size-3" aria-hidden="true" />
+					{t("terminal.cloudConnectRetry")}
+				</button>
+			</div>
+		</div>
+	);
+}
+
+function ReplayCover({ message }: { message?: string }) {
+	return (
+		// xterm remains live underneath. Cloud startup has no meaningful output
+		// until the agent TUI draws, so it gets one continuous Connecting surface;
+		// local replay stays deliberately silent to avoid covering settled output.
 		<div
-			aria-hidden="true"
-			className="bg-terminal-opaque pointer-events-none absolute inset-0"
+			aria-hidden={message ? undefined : "true"}
+			className="bg-terminal-opaque pointer-events-none absolute inset-0 grid place-items-center"
 			data-testid="terminal-replay-cover"
-		/>
+		>
+			{message ? <span className="font-mono text-sm text-terminal-dim">{message}</span> : null}
+		</div>
 	);
 }
 
@@ -1209,16 +1246,22 @@ function TerminalEndedStrip({ canRestore, error, isRestoring, onRestore, variant
 				</div>
 				{error && <div className="max-w-content-max truncate text-xs text-destructive">{error}</div>}
 				{canRestore && (
-					<button
-						type="button"
-						aria-label={t("terminal.restoreSession")}
-						title={t("terminal.restoreSession")}
-						className="inline-flex size-control-form shrink-0 items-center justify-center rounded-md border border-border bg-raised text-foreground transition hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-						disabled={isRestoring}
-						onClick={onRestore}
-					>
-						<RotateCcw className={cn("size-icon-base", isRestoring && "animate-spin")} aria-hidden="true" />
-					</button>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<span className="inline-flex">
+								<button
+									type="button"
+									aria-label={t("terminal.restoreSession")}
+									className="inline-flex size-control-form shrink-0 items-center justify-center rounded-md border border-border bg-raised text-foreground transition hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+									disabled={isRestoring}
+									onClick={onRestore}
+								>
+									<RotateCcw className={cn("size-icon-base", isRestoring && "animate-spin")} aria-hidden="true" />
+								</button>
+							</span>
+						</TooltipTrigger>
+						<TooltipContent side="bottom">{t("terminal.restoreSession")}</TooltipContent>
+					</Tooltip>
 				)}
 			</div>
 		</div>

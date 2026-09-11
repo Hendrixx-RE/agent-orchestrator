@@ -7,13 +7,12 @@ import { animate, LayoutGroup, motion, useMotionValue, useReducedMotion } from "
 import { NotificationCenter } from "./NotificationCenter";
 import {
 	CLOUD_PROJECT_KIND,
-	findProjectOrchestrator,
 	hasConfiguredOrchestratorAgent,
 	isOrchestratorSession,
 	sessionIsActive,
 	type WorkspaceSession,
 } from "../types/workspace";
-import { cloudSessionsQueryKey, useWorkspaceQuery, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
+import { cloudSessionsQueryKey, useWorkspaceScope, workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import {
 	clearTerminateSessionState,
 	useProjectTerminateSessionStates,
@@ -88,7 +87,6 @@ export function ShellTopbar({
 	const isInspectorOpen = useUiStore((state) =>
 		currentSessionId ? (state.inspectorSessions[currentSessionId]?.isOpen ?? true) : false,
 	);
-	const restartingProjectIds = useUiStore((state) => state.restartingProjectIds);
 	const requestNewTask = useUiStore((state) => state.requestNewTask);
 	const isSidebarOpen = useUiStore(sidebarOccupiesLayout);
 	const isFullScreen = useWindowFullScreen();
@@ -115,11 +113,8 @@ export function ShellTopbar({
 	const [isSpawning, setIsSpawning] = useState(false);
 	// Board-scope spawn failures surface where the board actions render.
 	const [boardSpawnError, setBoardSpawnError] = useState<string | null>(null);
-	const all = useWorkspaceQuery().data ?? [];
-
-	const session = params.sessionId
-		? all.flatMap((workspace) => workspace.sessions).find((s) => s.id === params.sessionId)
-		: undefined;
+	const workspaceScope = useWorkspaceScope(params.projectId, params.sessionId).data;
+	const session = workspaceScope?.session;
 	const isSessionRoute = Boolean(params.sessionId);
 	const isOrchestrator = session ? isOrchestratorSession(session) : false;
 	// Project in scope: the session's workspace wins over the route param so the
@@ -128,13 +123,18 @@ export function ShellTopbar({
 	// removed, or data still loading) shows an empty crumb — never the raw
 	// route slug. "Board" is the root-board crumb only.
 	const projectId = session?.workspaceId ?? params.projectId;
+	const isProjectRestarting = useUiStore((state) =>
+		projectId ? state.restartingProjectIds.has(projectId) : false,
+	);
+	const isProvisioning = useUiStore((state) =>
+		projectId ? state.provisioningProjectIds.has(projectId) : false,
+	);
 	const isProjectBoardRoute = !isSessionRoute && Boolean(projectId);
 	const isRootBoardRoute = !isSessionRoute && !isProjectBoardRoute;
-	const project = projectId ? all.find((workspace) => workspace.id === projectId) : undefined;
+	const project = workspaceScope?.project;
 	const projectLabel = project?.name ?? session?.workspaceName ?? (projectId ? "" : t("shell.board"));
-	const orchestrator = projectId ? findProjectOrchestrator(all, projectId) : undefined;
+	const orchestrator = workspaceScope?.orchestrator;
 	const orchestratorActivityLabel = orchestrator ? getAgentActivityView(orchestrator.activity, t).label : undefined;
-	const isProjectRestarting = projectId ? restartingProjectIds.has(projectId) : false;
 	const orchestratorActionLabel = orchestrator ? t("shell.openOrchestrator") : t("shell.spawnOrchestrator");
 	const orchestratorTooltip = isProjectRestarting
 		? t("shell.restarting")
@@ -146,12 +146,12 @@ export function ShellTopbar({
 		projectId ? void navigate({ to: "/projects/$projectId", params: { projectId } }) : void navigate({ to: "/" });
 
 	const openNewTask = () => {
-		if (!projectId || isProjectRestarting) return;
+		if (!projectId || isProjectRestarting || isProvisioning) return;
 		requestNewTask(projectId);
 	};
 
 	const openOrchestrator = async () => {
-		if (!projectId) return;
+		if (!projectId || isProvisioning) return;
 		setBoardSpawnError(null);
 		void addRendererExceptionStep("Orchestrator open requested", {
 			source: "orchestrator-open",
@@ -276,7 +276,7 @@ export function ShellTopbar({
 										aria-label={t("shell.newTask")}
 										className="topbar-control--labeled"
 										data-priority="primary"
-										disabled={isProjectRestarting}
+										disabled={isProjectRestarting || isProvisioning}
 										onClick={openNewTask}
 										variant="accent"
 									>
@@ -298,7 +298,7 @@ export function ShellTopbar({
 										}
 										className="topbar-control--labeled"
 										data-priority="secondary"
-										disabled={isSpawning || isProjectRestarting}
+										disabled={isSpawning || isProjectRestarting || isProvisioning}
 										onClick={() => void openOrchestrator()}
 										variant="primary"
 									>
@@ -329,7 +329,7 @@ export function ShellTopbar({
 												aria-label={t("shell.newTask")}
 												className="topbar-control--labeled"
 												data-priority="primary"
-												disabled={isProjectRestarting}
+												disabled={isProjectRestarting || isProvisioning}
 												onClick={openNewTask}
 												variant="accent"
 											>
@@ -374,6 +374,8 @@ export function ShellTopbar({
 								key={`open-workspace-${session.id}`}
 								sessionId={session.id}
 								projectId={session.workspaceId}
+								sessionCreatedAt={session.createdAt}
+								sessionTerminated={session.isTerminated}
 								style={noDragStyle}
 							/>
 						) : null}
@@ -413,7 +415,7 @@ export function ShellTopbar({
 											aria-label={t("shell.openOrchestrator")}
 											className="topbar-control--labeled -mr-1"
 											data-priority="secondary"
-											disabled={isSpawning || isProjectRestarting}
+											disabled={isSpawning || isProjectRestarting || isProvisioning}
 											onClick={() => void openOrchestrator()}
 											variant="primary"
 										>
@@ -472,25 +474,31 @@ export function TopbarKillButton({
 
 	return (
 		<div className="inline-flex items-center gap-1.5" style={noDragStyle}>
-			<SessionTerminationPopover
-				onConfirm={confirmKill}
-				onOpenChange={setConfirmOpen}
-				open={confirmOpen}
-				session={session}
-				trigger={
-					<TopbarButton
-						aria-label={isPending ? t("shell.killing") : t("shell.killSession")}
-						disabled={isPending}
-						onClick={() => {
-							clearTerminateSessionState(queryClient, session.id);
-						}}
-						title={t("shell.killSession")}
-						variant="killIcon"
-					>
-						<Trash2 className="size-icon-md" aria-hidden="true" />
-					</TopbarButton>
-				}
-			/>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<span className="inline-flex">
+						<SessionTerminationPopover
+							onConfirm={confirmKill}
+							onOpenChange={setConfirmOpen}
+							open={confirmOpen}
+							session={session}
+							trigger={
+								<TopbarButton
+									aria-label={isPending ? t("shell.killing") : t("shell.killSession")}
+									disabled={isPending}
+									onClick={() => {
+										clearTerminateSessionState(queryClient, session.id);
+									}}
+									variant="killIcon"
+								>
+									<Trash2 className="size-icon-md" aria-hidden="true" />
+								</TopbarButton>
+							}
+						/>
+					</span>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">{t("shell.killSession")}</TooltipContent>
+			</Tooltip>
 			{error ? <TopbarActionError>{error}</TopbarActionError> : null}
 		</div>
 	);
