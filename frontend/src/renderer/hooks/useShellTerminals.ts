@@ -10,6 +10,7 @@ import { apiClient, apiErrorCode, hasTrustedApiBaseUrl } from "../lib/api-client
 import { mockShellTerminals } from "../lib/mock-data";
 import { isWindowsPlatform } from "../lib/platform";
 import { terminalShellRequestValue, useTerminalShellStore } from "../stores/terminal-shell-store";
+import { useCloudCp } from "./useCloudCp";
 
 export type ShellTerminal = {
 	/** Runtime handle the terminal mux attaches to, exactly like a session pane's. */
@@ -145,6 +146,7 @@ function addOptimisticShell(queryClient: ReturnType<typeof useQueryClient>, shel
  */
 export function useOpenShellTerminal() {
 	const queryClient = useQueryClient();
+	const { client: cloudCpClient } = useCloudCp();
 	const mutation = useMutation({
 		mutationFn: async ({
 			projectId,
@@ -168,6 +170,9 @@ export function useOpenShellTerminal() {
 			}
 			if (cloud) {
 				if (!sessionId) throw new Error("A cloud shell terminal must belong to a session");
+				// Explicitly resume the cloud session before opening its shell, so a
+				// paused sandbox is woken rather than the shell attaching to nothing.
+				await cloudCpClient.resumeSession(cloud.orgId, sessionId);
 				const current = queryClient.getQueryData<ShellTerminal[]>(shellTerminalsQueryKey) ?? [];
 				const shell: ShellTerminal = {
 					handleId: `cloud-shell-${crypto.randomUUID()}`,
