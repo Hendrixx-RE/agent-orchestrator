@@ -66,11 +66,11 @@ type AgentSwitch struct {
 	TargetRuntimeHandleID   string
 	TargetAcknowledgedAt    sql.NullTime
 	ErrorCode               string
-	FailurePoint            string
 	RequestedAt             time.Time
 	UpdatedAt               time.Time
 	FinalHandoffPath        string
 	FinalHandoffHash        string
+	FailurePoint            string
 }
 
 type AgentSwitchFailureDeliveryState struct {
@@ -234,6 +234,7 @@ type Conversation struct {
 	UsageCost                  sql.NullFloat64
 	UsageCurrency              sql.NullString
 	ActiveBranchID             string
+	OpencodeMode               string
 }
 
 type ConversationActivity struct {
@@ -402,6 +403,8 @@ type PR struct {
 	StateChangedAt           sql.NullTime
 	AutoInjectCI             bool
 	ProviderID               string
+	AuthorAvatarURL          string
+	ReviewPartial            bool
 }
 
 type PRCheck struct {
@@ -473,15 +476,17 @@ type Project struct {
 }
 
 type Review struct {
-	ID               string
-	SessionID        domain.SessionID
-	ProjectID        domain.ProjectID
-	Harness          domain.ReviewerHarness
-	PRURL            string
-	ReviewerHandleID string
-	AgentSessionID   string
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	ID                    string
+	SessionID             domain.SessionID
+	ProjectID             domain.ProjectID
+	Harness               domain.ReviewerHarness
+	PRURL                 string
+	ReviewerHandleID      string
+	AgentSessionID        string
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	ReviewerActivityState string
+	ReviewerLaunchID      string
 }
 
 type ReviewRun struct {
@@ -546,6 +551,7 @@ type Session struct {
 	Model                     string
 	LatestUserPromptAt        sql.NullTime
 	ReviewerAgentConfig       string
+	SessionPermissions        string
 }
 
 type SessionCleanupFact struct {
@@ -603,6 +609,7 @@ type ShellTerminal struct {
 	AppRunID   string
 	CreatedAt  time.Time
 	SessionID  sql.NullString
+	Transient  bool
 }
 
 type TelemetryEvent struct {

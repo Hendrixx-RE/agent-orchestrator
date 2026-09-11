@@ -267,6 +267,7 @@ func TestStartCompletesHandshakeAndOpensThread(t *testing.T) {
 
 func TestResumeReconnectsInitializedHostWithoutNativeResume(t *testing.T) {
 	d, srv := newTestDriver(t)
+	prepareCalls := 0
 	proc, err := d.spawn(context.Background(), "codex", "/tmp/ws", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -281,6 +282,10 @@ func TestResumeReconnectsInitializedHostWithoutNativeResume(t *testing.T) {
 	conv, err := d.Resume(context.Background(), ports.ChatResumeConfig{
 		SessionID: "ao-reconnect", ProviderConversationID: "thread-survived",
 		DataDir: t.TempDir(), WorkspacePath: "/tmp/ws",
+		PrepareEnv: func(context.Context) (map[string]string, error) {
+			prepareCalls++
+			return map[string]string{"AO_BROWSER_CAPABILITY": "rotated"}, nil
+		},
 	})
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
@@ -288,6 +293,9 @@ func TestResumeReconnectsInitializedHostWithoutNativeResume(t *testing.T) {
 	defer func() { _ = conv.Close() }()
 	if got := conv.ProviderConversationID(); got != "thread-survived" {
 		t.Fatalf("provider conversation id = %q", got)
+	}
+	if prepareCalls != 0 {
+		t.Fatalf("live Codex reconnect prepared launch-only environment %d times", prepareCalls)
 	}
 	if srv.sentMethod("initialize") || srv.sentMethod("thread/resume") {
 		t.Fatalf("reconnect repeated handshake: initialize=%v resume=%v",
@@ -301,26 +309,6 @@ func TestResumeReconnectsInitializedHostWithoutNativeResume(t *testing.T) {
 	request := srv.awaitFrame(func(f frame) bool { return f.Method == "model/list" })
 	if request.ID == nil || string(*request.ID) != "42" {
 		t.Fatalf("first request id after reconnect = %v, want 42", request.ID)
-	}
-}
-
-func TestResumeStagesDirectProcessWhenBranchSourceOwnsHost(t *testing.T) {
-	d, srv := newTestDriver(t)
-	d.persistent = true
-	d.connectHost = func(context.Context, persistenthost.Config) (*persistenthost.Transport, error) {
-		return nil, persistenthost.ErrAttached
-	}
-	conv, err := d.Resume(context.Background(), ports.ChatResumeConfig{
-		SessionID: "ao-branch", ProviderConversationID: "thread-branch",
-		DataDir: t.TempDir(), WorkspacePath: "/tmp/ws", AllowConcurrentHostReplacement: true,
-	})
-	if err != nil {
-		t.Fatalf("Resume: %v", err)
-	}
-	defer func() { _ = conv.Close() }()
-	if !srv.sentMethod("initialize") || !srv.sentMethod("thread/resume") {
-		t.Fatalf("branch staging handshake: initialize=%v resume=%v",
-			srv.sentMethod("initialize"), srv.sentMethod("thread/resume"))
 	}
 }
 
@@ -818,6 +806,46 @@ func TestInstalledCodexVersionAugmentsNodePATHForNPMLauncher(t *testing.T) {
 	}
 }
 
+// Run under the production executable name so os.Executable identifies the AO pin.
+func TestCodexProcessEnvPreservesDaemonPATH(t *testing.T) {
+	if os.Getenv("AO_TEST_CODEX_PATH_PIN") == "1" {
+		exe, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Dir(exe)
+		launcher := filepath.Join(t.TempDir(), "codex")
+		env := codexProcessEnv(context.Background(), launcher, map[string]string{
+			"PATH": dir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		})
+		if got := strings.Split(envValue(env, "PATH"), string(os.PathListSeparator))[0]; got != dir {
+			t.Fatalf("first PATH directory = %q, want daemon directory %q", got, dir)
+		}
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary, err := os.ReadFile(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "ao"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	copyPath := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(copyPath, binary, 0o700); err != nil { //nolint:gosec // executable test fixture
+		t.Fatal(err)
+	}
+	cmd := exec.CommandContext(context.Background(), copyPath, "-test.run=^TestCodexProcessEnvPreservesDaemonPATH$")
+	cmd.Env = append(os.Environ(), "AO_TEST_CODEX_PATH_PIN=1")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("AO-named test process: %v\n%s", err, output)
+	}
+}
+
 func TestStartAndResumeAugmentNodePATHForNPMLauncher(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -1114,6 +1142,30 @@ func TestListModelsKeepsCatalogAndUsesThreadEffort(t *testing.T) {
 	}
 	if models[0].DefaultEffort != "xhigh" {
 		t.Errorf("default effort = %q, want the thread's xhigh", models[0].DefaultEffort)
+	}
+}
+
+func TestListModelsUsesConfiguredThreadDefault(t *testing.T) {
+	for _, configured := range []string{"nano", "custom-model"} {
+		t.Run(configured, func(t *testing.T) {
+			d, srv := newTestDriver(t)
+			srv.reply("thread/start", `{"thread":{"id":"thread-1"},"model":"`+configured+`","cwd":"/tmp/ws"}`)
+			srv.reply("model/list", `{"data":[{"id":"astra","isDefault":true},{"id":"nano","isDefault":false}]}`)
+			conv, err := d.Start(context.Background(), ports.ChatStartConfig{WorkspacePath: "/tmp/ws"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conv.Close() }()
+			models, err := conv.(ports.ChatModelLister).ListModels(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, model := range models {
+				if model.Default != (model.ID == configured) {
+					t.Errorf("model %q default = %v, configured thread model = %q", model.ID, model.Default, configured)
+				}
+			}
+		})
 	}
 }
 

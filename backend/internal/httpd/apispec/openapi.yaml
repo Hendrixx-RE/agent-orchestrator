@@ -2152,6 +2152,51 @@ paths:
       summary: Replace a project's per-project config
       tags:
       - projects
+  /api/v1/projects/{id}/permissions:
+    patch:
+      operationId: setProjectPermissions
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetProjectPermissionsInput'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Remember project permissions for future sessions
+      tags:
+      - projects
   /api/v1/projects/clone:
     post:
       operationId: cloneProject
@@ -2187,6 +2232,70 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Internal Server Error
       summary: Clone and register a project from a git repository URL
+      tags:
+      - projects
+  /api/v1/projects/clone/cleanup:
+    post:
+      operationId: cleanupPreparedClone
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectClonePreparationCleanupInput'
+        required: true
+      responses:
+        "204":
+          description: No Content
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Remove an abandoned clone created for project preparation
+      tags:
+      - projects
+  /api/v1/projects/clone/prepare:
+    post:
+      operationId: prepareCloneProject
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloneProjectInput'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClonePreparationResult'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Clone a project without registering it so Git setup can be completed
       tags:
       - projects
   /api/v1/projects/initialize:
@@ -6388,6 +6497,62 @@ paths:
       summary: Rename a standalone shell terminal tab
       tags:
       - shellTerminals
+  /api/v1/system/github-auth:
+    get:
+      operationId: getGitHubAuthRequirement
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemRequirement'
+          description: OK
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Check advisory GitHub CLI authentication without blocking startup
+      tags:
+      - system
+  /api/v1/system/github-auth/terminal:
+    post:
+      operationId: openGitHubAuthTerminal
+      responses:
+        "201":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShellTerminalEnvelope'
+          description: Created
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Open a trusted terminal running the GitHub CLI login flow
+      tags:
+      - system
   /api/v1/system/install/{target}:
     get:
       operationId: getSystemInstallStatus
@@ -6631,6 +6796,8 @@ components:
       properties:
         asWorkspace:
           type: boolean
+        clonePreparationId:
+          type: string
         config:
           $ref: '#/components/schemas/ProjectConfig'
         name:
@@ -7164,6 +7331,10 @@ components:
       type: object
     CleanupSessionsResponse:
       properties:
+        alreadyGone:
+          items:
+            type: string
+          type: array
         cleaned:
           items:
             type: string
@@ -7177,6 +7348,7 @@ components:
       required:
       - ok
       - cleaned
+      - alreadyGone
       - skipped
       type: object
     CleanupSkippedSession:
@@ -7188,6 +7360,19 @@ components:
       required:
       - sessionId
       - reason
+      type: object
+    ClonePreparationResult:
+      properties:
+        path:
+          type: string
+        preparationId:
+          type: string
+        remoteUrl:
+          type: string
+      required:
+      - path
+      - remoteUrl
+      - preparationId
       type: object
     CloneProjectInput:
       properties:
@@ -7834,6 +8019,8 @@ components:
           type: boolean
         branch:
           type: string
+        chatProviderPreserved:
+          type: boolean
         createdAt:
           format: date-time
           type: string
@@ -7923,11 +8110,7 @@ components:
           - opencode
           - kiro
           - pi
-          - qwen
           - agy
-          - continue
-          - goose
-          - vibe
           - devin
           - droid
           - kimi
@@ -7992,6 +8175,7 @@ components:
       - createdAt
       - updatedAt
       - isPinned
+      - chatProviderPreserved
       - status
       - kanbanColumn
       - displayStatus
@@ -8133,6 +8317,13 @@ components:
         groupName:
           type: string
         name:
+          type: string
+        permissionMode:
+          enum:
+          - default
+          - accept-edits
+          - auto
+          - bypass-permissions
           type: string
         value:
           type: string
@@ -8717,7 +8908,7 @@ components:
             $ref: '#/components/schemas/AttachmentInput'
           type: array
         brief:
-          maxLength: 4096
+          maxLength: 16384
           type: string
         mode:
           enum:
@@ -8870,6 +9061,20 @@ components:
       type: object
     EditQueuedConversationMessageRequest:
       properties:
+        attachments:
+          items:
+            $ref: '#/components/schemas/ConversationImageContentRequest'
+          type: array
+        expectedRevision:
+          type:
+          - "null"
+          - integer
+        retainedContent:
+          items:
+            type: integer
+          type:
+          - "null"
+          - array
         text:
           type: string
       required:
@@ -8966,12 +9171,24 @@ components:
       - sessionId
       - session
       type: object
+    GitHubRepositoryPreparation:
+      properties:
+        name:
+          type: string
+        owner:
+          type: string
+        private:
+          type:
+          - "null"
+          - boolean
+      type: object
     GitPreparationEvent:
       properties:
         action:
           enum:
           - git_init
           - git_commit
+          - create_remote_repository
           - set_remote
           type: string
         error:
@@ -8998,6 +9215,8 @@ components:
           items:
             type: string
           type: array
+        githubRepository:
+          $ref: '#/components/schemas/GitHubRepositoryPreparation'
         importKind:
           enum:
           - project
@@ -9015,6 +9234,8 @@ components:
           items:
             $ref: '#/components/schemas/GitRepositoryPreparationInput'
           type: array
+        stepwise:
+          type: boolean
       required:
       - importKind
       - path
@@ -9037,6 +9258,8 @@ components:
           items:
             type: string
           type: array
+        githubRepository:
+          $ref: '#/components/schemas/GitHubRepositoryPreparation'
         initialCommitMessage:
           type: string
         remoteUrl:
@@ -9352,6 +9575,14 @@ components:
       type: object
     ListReviewsResponse:
       properties:
+        reviewerActivityState:
+          enum:
+          - active
+          - idle
+          - waiting_input
+          - blocked
+          - exited
+          type: string
         reviewerHandleId:
           type: string
         reviewerHarness:
@@ -9872,6 +10103,18 @@ components:
       - defaultBranch
       - folderMissing
       type: object
+    ProjectClonePreparationCleanupInput:
+      properties:
+        path:
+          minLength: 1
+          type: string
+        preparationId:
+          minLength: 1
+          type: string
+      required:
+      - path
+      - preparationId
+      type: object
     ProjectConfig:
       properties:
         agentConfig:
@@ -9882,6 +10125,8 @@ components:
           type: string
         autoReview:
           type: boolean
+        canonicalRepoURL:
+          type: string
         containerReap:
           $ref: '#/components/schemas/ContainerReapConfig'
         defaultBranch:
@@ -10647,6 +10892,10 @@ components:
           items:
             $ref: '#/components/schemas/SessionPRUnresolvedReviewer'
           type: array
+        unresolvedThreadCount:
+          type:
+          - "null"
+          - integer
       required:
       - decision
       - hasUnresolvedHumanComments
@@ -10657,6 +10906,8 @@ components:
         additions:
           type: integer
         author:
+          type: string
+        authorAvatarUrl:
           type: string
         changedFiles:
           type: integer
@@ -10878,6 +11129,20 @@ components:
       required:
       - config
       type: object
+    SetProjectPermissionsInput:
+      properties:
+        permissions:
+          enum:
+          - default
+          - accept-edits
+          - auto
+          - bypass-permissions
+          type: string
+        sourceHarness:
+          type: string
+      required:
+      - permissions
+      type: object
     SetReviewActivityRequest:
       properties:
         agentSessionId:
@@ -10890,8 +11155,8 @@ components:
           description: AO process generation that produced the signal.
           type: string
         state:
-          description: Reviewer activity state reported by a hook. Accepted for forward
-            compatibility, not used for session display state.
+          description: Reviewer activity state reported by a hook. Used for reviewer-pane
+            live status, not worker session state.
           enum:
           - active
           - idle
@@ -11000,11 +11265,7 @@ components:
           - opencode
           - kiro
           - pi
-          - qwen
           - agy
-          - continue
-          - goose
-          - vibe
           - devin
           - droid
           - kimi
@@ -11157,7 +11418,7 @@ components:
         projectId:
           type: string
         prompt:
-          maxLength: 4096
+          maxLength: 16384
           type: string
         trackerProvider:
           enum:
@@ -11388,6 +11649,7 @@ components:
           - tmux
           - harness
           - gh
+          - github-auth
           type: string
         label:
           description: Human-readable requirement name.
@@ -11448,11 +11710,7 @@ components:
           - opencode
           - kiro
           - pi
-          - qwen
           - agy
-          - continue
-          - goose
-          - vibe
           - devin
           - droid
           - kimi

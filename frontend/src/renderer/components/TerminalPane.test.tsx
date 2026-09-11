@@ -32,6 +32,7 @@ const {
 	cloudTicketMock,
 	xtermMounts,
 	xtermUnmounts,
+	xtermFocusRequests,
 } = vi.hoisted(
 	() => ({
 		attachMock: vi.fn(() => vi.fn()),
@@ -56,6 +57,7 @@ const {
 		cloudTicketMock: vi.fn(async () => ({ ticket: "ticket" })),
 		xtermMounts: { value: 0 },
 		xtermUnmounts: { value: 0 },
+		xtermFocusRequests: { value: 0 },
 	}),
 );
 let terminalLinkHandler: ((uri: string) => void) | undefined;
@@ -88,6 +90,8 @@ vi.mock("../lib/api-client", () => ({
 
 vi.mock("./XtermTerminal", () => ({
 	XtermTerminal: (props: {
+		focusRequested?: boolean;
+		isVisible?: boolean;
 		onLinkOpen?: (uri: string) => void;
 		onReady?: (terminal: AttachableTerminal) => void;
 	}) => {
@@ -97,6 +101,9 @@ vi.mock("./XtermTerminal", () => ({
 			xtermMounts.value += 1;
 			instance.current = xtermMounts.value;
 		}
+		useEffect(() => {
+			if (props.focusRequested && props.isVisible !== false) xtermFocusRequests.value += 1;
+		}, [props.focusRequested, props.isVisible]);
 		useEffect(() => {
 			const disposable = { dispose: vi.fn() };
 			props.onReady?.({
@@ -174,6 +181,7 @@ beforeEach(() => {
 	sendUserInputMock.mockReturnValue(true);
 	xtermMounts.value = 0;
 	xtermUnmounts.value = 0;
+	xtermFocusRequests.value = 0;
 	useUiStore.setState({ inspectorSessions: {} });
 });
 
@@ -287,11 +295,13 @@ function renderCachedPane({
 	sessions,
 	shellTerminals = [],
 	terminalTarget,
+	focusRequested = false,
 }: {
 	session?: WorkspaceSession;
 	sessions: WorkspaceSession[];
 	shellTerminals?: ShellTerminal[];
 	terminalTarget?: TerminalTarget;
+	focusRequested?: boolean;
 }) {
 	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 	queryClient.setQueryData(workspaceQueryKey, workspaceWithSessions(sessions));
@@ -310,6 +320,7 @@ function renderCachedPane({
 							session={nextSession}
 							terminalTarget={nextTarget}
 							theme="dark"
+							focusRequested={focusRequested}
 						/>
 					) : (
 						<div data-testid="away" />
@@ -647,6 +658,27 @@ describe("TerminalCacheProvider", () => {
 			view.show(sessions[0]);
 			await waitFor(() => expect(activeXterm()).toBe(oldest));
 			expect(xtermMounts.value).toBe(7);
+		} finally {
+			view.restore();
+		}
+	});
+
+	it("focuses each retained TUI terminal when switching among TUI sessions", async () => {
+		const tuiA = { ...sessionA, mode: "tui" as const };
+		const tuiB = { ...sessionB, mode: "tui" as const };
+		const view = renderCachedPane({
+			focusRequested: true,
+			session: tuiA,
+			sessions: [tuiA, tuiB],
+		});
+		try {
+			await waitFor(() => expect(xtermFocusRequests.value).toBe(1));
+
+			view.show(tuiB);
+			await waitFor(() => expect(xtermFocusRequests.value).toBe(2));
+
+			view.show(tuiA);
+			await waitFor(() => expect(xtermFocusRequests.value).toBe(3));
 		} finally {
 			view.restore();
 		}
