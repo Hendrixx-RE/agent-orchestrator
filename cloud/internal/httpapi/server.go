@@ -59,6 +59,7 @@ type Store interface {
 	SendMessage(context.Context, domain.Principal, string, string, string, string) (domain.ClientEvent, error)
 	ListClientEvents(context.Context, domain.Principal, string, string, int64, int) ([]domain.ClientEvent, bool, error)
 	SetSandboxDesiredState(ctx context.Context, principal domain.Principal, orgID, sessionID, desiredState string) error
+	ResumeSession(context.Context, domain.Principal, string, string) (domain.SandboxLifecycle, error)
 	WakePausedSessions(context.Context, domain.Principal, string) (int64, error)
 	RedeemWorkerBootstrapTicket(context.Context, string) (domain.AccessTicket, error)
 	WorkerLaunchSpec(context.Context, string, string) (domain.WorkerLaunch, error)
@@ -399,8 +400,9 @@ func New(options Options) *Server {
 			router.Post("/provider-connections/agents/{agent}/promote", server.promoteAgentConnection)
 			router.Get("/sessions", server.listSessions)
 			router.Post("/sessions", server.createSession)
-			router.Post("/sessions/wake", server.wakePausedSessions)
 			router.Get("/sessions/{sessionId}", server.getSession)
+			router.Post("/sessions/wake", server.wakePausedSessions)
+			router.Post("/sessions/{sessionId}/resume", server.resumeSession)
 			router.Get("/sessions/{sessionId}/children", server.listSessionChildren)
 			router.Delete("/sessions/{sessionId}", server.deleteSession)
 			router.Post("/sessions/{sessionId}/messages", server.sendMessage)

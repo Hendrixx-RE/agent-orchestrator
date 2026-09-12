@@ -36,11 +36,11 @@ import type {
 	CloudCpSessionChildrenResponse,
 	CloudCpSessionDeletedResponse,
 	CloudCpSessionListResponse,
+	CloudCpResumeSessionResponse,
 	CloudCpSessionResponse,
 	CloudCpTerminalTicketRequest,
 	CloudCpTerminalTicketResponse,
 	CloudCpUpdateProjectRequest,
-	CloudCpWakeSessionsResponse,
 } from "./types";
 
 const API_PREFIX = "/api/cloud/v1";
@@ -131,7 +131,11 @@ export interface CloudCpClient {
 		sessionId: string,
 		options?: CloudCpRequestOptions,
 	): Promise<CloudCpSessionDeletedResponse>;
-	wakePausedSessions(orgId: string, options?: CloudCpRequestOptions): Promise<CloudCpWakeSessionsResponse>;
+	resumeSession(
+		orgId: string,
+		sessionId: string,
+		options?: CloudCpRequestOptions,
+	): Promise<CloudCpResumeSessionResponse>;
 
 	sendSessionMessage(
 		orgId: string,
@@ -380,8 +384,10 @@ export function createCloudCpClient(options: CloudCpClientOptions): CloudCpClien
 			}),
 		deleteSession: (orgId, sessionId, o) =>
 			requestJson("DELETE", `/orgs/${seg(orgId)}/sessions/${seg(sessionId)}`, { signal: o?.signal }),
-		wakePausedSessions: (orgId, o) =>
-			requestJson("POST", `/orgs/${seg(orgId)}/sessions/wake`, { signal: o?.signal }),
+		resumeSession: (orgId, sessionId, o) =>
+			requestJson("POST", `/orgs/${seg(orgId)}/sessions/${seg(sessionId)}/resume`, {
+				signal: o?.signal,
+			}),
 
 		sendSessionMessage: (orgId, sessionId, body, o) =>
 			requestJson("POST", `/orgs/${seg(orgId)}/sessions/${seg(sessionId)}/messages`, {

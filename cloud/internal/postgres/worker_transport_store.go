@@ -22,7 +22,7 @@ const (
 	maxTerminalOutputBytes          = 4 << 20
 	maxActiveTerminalSessions       = 8
 	// interactiveSessionLease prevents the idle scanner from pausing a sandbox
-	// while a user is connecting to either terminal surface.
+	// while an explicit resume or fresh terminal input is still active.
 	interactiveSessionLease = 2 * time.Minute
 	// unconsumedTicketThreshold is the number of unconsumed tickets minted in
 	// the last interactiveSessionLease window above which we stop refreshing
@@ -30,6 +30,11 @@ const (
 	// tickets but never opening a WebSocket would otherwise keep a sandbox
 	// awake — and billed — indefinitely.
 	unconsumedTicketThreshold = 10
+	// interactionRefreshThrottle bounds how often active terminal input rewrites
+	// the interactive lease. Within one lease window the lease is refreshed at
+	// most once per (interactiveSessionLease - interactionRefreshThrottle), so a
+	// fast typist does not rewrite ao_sandboxes on every keystroke.
+	interactionRefreshThrottle = 30 * time.Second
 )
 
 func (s *Store) CreateWorkspaceRequest(
@@ -465,27 +470,24 @@ func (s *Store) IssueTerminalTicket(
 	return token, scopes, nil
 }
 
-// RefreshTerminalInteraction extends the short wake lease for a visible
-// workspace terminal. Agent streams are retained in the browser for output
-// continuity, so they deliberately do not prevent normal idle pause.
+// RefreshTerminalInteraction extends the short wake lease after actual user
+// input. Merely opening or retaining either terminal stream is not activity.
 func (s *Store) RefreshTerminalInteraction(
 	ctx context.Context,
 	terminal domain.TerminalSession,
 	ttl time.Duration,
 ) error {
-	if terminal.Kind != "workspace" {
-		return nil
-	}
 	return s.withOrg(ctx, terminal.OrgID, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE ao_sandboxes
-			SET interactive_until = now() + $1::interval, updated_at = now()
+			SET interactive_until = now() + $1::interval,
+				reconcile_after = now(), updated_at = now()
 			WHERE org_id = $2 AND session_id = $3
 			  AND desired_state = 'running'
 			  AND EXISTS (
 				SELECT 1 FROM ao_terminal_sessions
 				WHERE org_id = $2 AND session_id = $3 AND id = $4
-				  AND worker_epoch = $5 AND kind = 'workspace'
+				  AND worker_epoch = $5
 				  AND state IN ('opening', 'open') AND expires_at > now()
 			  )`,
 			intervalString(ttl), terminal.OrgID, terminal.SessionID,

@@ -118,15 +118,13 @@ function CloudCredentialsSectionInner({ titleHidden }: { titleHidden?: boolean }
 					<SettingsRow key="github-pat" icon={KeyRound} label="GitHub private repositories">
 						<span className="text-sm leading-5 text-settings-muted">{githubPATConnected ? "Connected" : "Not connected"}</span>
 					</SettingsRow>
-					<p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-						Optional. Paste a GitHub personal access token with access to private repositories. It is encrypted and used only by Cloud workers when cloning GitHub repositories.
-					</p>
+					<p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t("settings.githubPat.description")}</p>
 					<div className="mt-2 flex items-center gap-2">
 						<Input type="password" autoComplete="off" spellCheck={false} value={githubPAT} onChange={(event) => setGitHubPAT(event.target.value)} placeholder="github_pat_…" />
 						<Button type="button" variant="footer" disabled={githubPATBusy || githubPAT.trim() === ""} onClick={() => void saveGitHubPAT()}>
 							{githubPATBusy ? "Saving…" : "Save token"}
 						</Button>
-						{githubPATConnected ? <Button type="button" variant="footer" disabled={githubPATBusy} onClick={() => void removeGitHubPAT()}>Remove</Button> : null}
+						{githubPATConnected ? <Button type="button" variant="footer" disabled={githubPATBusy} onClick={() => void removeGitHubPAT()}>{t("settings.githubPat.remove")}</Button> : null}
 					</div>
 					{githubPATError ? <p role="alert" className="mt-2 text-xs text-error">{githubPATError}</p> : null}
 				</div>

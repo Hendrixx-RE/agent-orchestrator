@@ -75,6 +75,9 @@ type sessionResponse struct {
 	ActivityState    string    `json:"activityState"`
 	Status           string    `json:"status"`
 	RuntimeConnected bool      `json:"runtimeConnected"`
+	SandboxProvider  string    `json:"sandboxProvider,omitempty"`
+	DesiredState     string    `json:"desiredState,omitempty"`
+	ObservedState    string    `json:"observedState,omitempty"`
 	RuntimeState     string    `json:"runtimeState,omitempty"`
 	RuntimeError     string    `json:"runtimeError,omitempty"`
 	IsTerminated     bool      `json:"isTerminated"`
@@ -489,6 +492,29 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "page": page})
 }
 
+// resumeSession records one explicit user intent and lets the reconciler own
+// every slow provider/worker transition. The response is the accepted intent,
+// not a claim that the workspace is connected yet.
+func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request) {
+	orgID := chi.URLParam(r, "orgId")
+	sessionID := chi.URLParam(r, "sessionId")
+	if requireUUID(orgID, "orgId") != nil || requireUUID(sessionID, "sessionId") != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "orgId and sessionId must be UUIDs.")
+		return
+	}
+	lifecycle, err := s.store.ResumeSession(
+		r.Context(), principalFrom(r), orgID, sessionID,
+	)
+	if err != nil {
+		s.writeStoreError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"session": map[string]any{
+		"id": lifecycle.SessionID, "sandboxProvider": lifecycle.Provider,
+		"desiredState": lifecycle.DesiredState, "observedState": lifecycle.ObservedState,
+	}})
+}
+
 // listSessionChildren lists the sessions an orchestrator spawned, with their
 // pull requests, for the session inspector's Workers view. Same wire shape as
 // the worker-facing /worker/children listing (sessionChildResponse).
@@ -670,6 +696,9 @@ func toSessionResponse(session domain.Session, prs []contract.PRFacts) sessionRe
 		ActivityState:    string(session.ActivityState),
 		Status:           string(session.Status(time.Now().UTC(), prs)),
 		RuntimeConnected: session.RuntimeConnected,
+		SandboxProvider:  session.SandboxProvider,
+		DesiredState:     session.DesiredState,
+		ObservedState:    session.ObservedState,
 		RuntimeState:     session.RuntimeState,
 		RuntimeError:     session.RuntimeError,
 		IsTerminated:     session.IsTerminated,
