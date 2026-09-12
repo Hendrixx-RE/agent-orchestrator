@@ -1366,7 +1366,15 @@ function CloudAgentSetupStep({
  * has one configured (only production does today — see AGENTS.md), so its
  * button says that instead of pretending to start an install it can't finish.
  */
-function CloudConnectCodeStep({ onUseToken, onInstallApp }: { onUseToken: () => void; onInstallApp: () => void }) {
+function CloudConnectCodeStep({
+	onUseToken,
+	onInstallApp,
+	onSkip,
+}: {
+	onUseToken: () => void;
+	onInstallApp: () => void;
+	onSkip: () => void;
+}) {
 	const { t } = useTranslation();
 	return (
 		<div className="flex flex-col gap-5">
@@ -1411,6 +1419,12 @@ function CloudConnectCodeStep({ onUseToken, onInstallApp }: { onUseToken: () => 
 					</Button>
 				</div>
 			</div>
+			<div className="flex items-center justify-between gap-3">
+				<span />
+				<Button type="button" variant="footer" onClick={onSkip}>
+					{t("createProject.skip", { defaultValue: "Skip" })}
+				</Button>
+			</div>
 			<p className="text-pretty text-[11.5px] leading-5 text-[var(--color-text-import-muted)]">
 				{t("createProject.connectCodeSkipped", { defaultValue: "Already connected? This screen is skipped from here on." })}
 			</p>
@@ -1432,7 +1446,7 @@ function CloudProjectCard({
 	const { org, error: orgError } = useCloudOrg();
 	const queryClient = useQueryClient();
 	const showGlobalToast = useUiStore((state) => state.showGlobalToast);
-	const [step, setStep] = useState<"connect" | "repository" | "agents">("connect");
+	const [step, setStep] = useState<"connect" | "github_token" | "repository" | "agents">("connect");
 	// Connect is asked once, ever: if the account already has a working GitHub
 	// token, skip straight to the repository step instead of showing this
 	// screen again on every project.
@@ -1451,6 +1465,23 @@ function CloudProjectCard({
 	useEffect(() => {
 		if (step === "connect" && githubAlreadyConnected) setStep("repository");
 	}, [step, githubAlreadyConnected]);
+
+	const saveGitHubTokenAndContinue = async () => {
+		const secret = githubToken.trim();
+		if (secret === "" || githubTokenBusy) return;
+		setGithubTokenBusy(true);
+		setGithubTokenError(null);
+		try {
+			await client.putGitHubPAT({ secret });
+			await queryClient.invalidateQueries({ queryKey: ["cloud-user-providers"] });
+			setGithubToken("");
+			setStep("repository");
+		} catch (err) {
+			setGithubTokenError(err instanceof Error ? err.message : t("createProject.couldNotAdd"));
+		} finally {
+			setGithubTokenBusy(false);
+		}
+	};
 	const [repositoryUrl, setRepositoryUrl] = useState("");
 	const [displayName, setDisplayName] = useState("");
 	const [defaultBranch, setDefaultBranch] = useState("main");
@@ -1516,6 +1547,7 @@ function CloudProjectCard({
 		setGithubTokenError(null);
 		try {
 			await client.putGitHubPAT({ secret });
+			await queryClient.invalidateQueries({ queryKey: ["cloud-user-providers"] });
 			setGithubToken("");
 			setRepositoryUnreachable(false);
 			setSubmitError(null);
@@ -1564,9 +1596,15 @@ function CloudProjectCard({
 					<X className="size-4" aria-hidden="true" />
 				</button>
 			) : null}
-			{step === "connect" ? (
+			{step === "connect" && githubConnection.isPending ? (
+				<div className="flex min-h-[160px] items-center justify-center">
+					<span className="text-[12px] text-[var(--color-text-import-muted)]">
+						{t("createProject.loading", { defaultValue: "Loading..." })}
+					</span>
+				</div>
+			) : step === "connect" ? (
 				<CloudConnectCodeStep
-					onUseToken={() => setStep("repository")}
+					onUseToken={() => setStep("github_token")}
 					onInstallApp={() =>
 						showGlobalToast(
 							t("createProject.installAppComingSoonTitle", { defaultValue: "The GitHub App isn't available yet" }),
@@ -1575,7 +1613,66 @@ function CloudProjectCard({
 							}),
 						)
 					}
+					onSkip={() => setStep("repository")}
 				/>
+			) : step === "github_token" ? (
+				<div className="flex flex-col gap-5">
+					<p className="import-description text-pretty">
+						{t("createProject.githubTokenDescription", { defaultValue: "Connect your GitHub account using a personal access token." })}
+					</p>
+					<div className="flex flex-col gap-2 rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-4">
+						<Label htmlFor="cloudGithubTokenSetup" className="text-[13px] font-semibold text-[var(--color-text-import-title)]">
+							{t("createProject.githubTokenLabel", { defaultValue: "GitHub token" })}
+						</Label>
+						<p className="text-pretty text-[12px] leading-5 text-[var(--color-text-import-muted)]">
+							{t("createProject.githubTokenHint", {
+								defaultValue: "Needs Contents: read and write on this repository.",
+							})}
+						</p>
+						<div className="flex items-center gap-2">
+							<div className="relative flex-1">
+								<span className="pointer-events-none absolute inset-y-0 left-3 flex w-4 items-center justify-center text-[var(--color-text-import-muted)]">
+									<KeyRound className="size-4" aria-hidden="true" />
+								</span>
+								<Input
+									id="cloudGithubTokenSetup"
+									type="password"
+									autoComplete="off"
+									spellCheck={false}
+									className="bg-[var(--color-bg-import-card)] pl-10 font-mono text-[13px]"
+									placeholder="github_pat_…"
+									disabled={githubTokenBusy}
+									value={githubToken}
+									onChange={(event) => setGithubToken(event.target.value)}
+									onKeyDown={(event) => {
+										if (event.key === "Enter") {
+											event.preventDefault();
+											void saveGitHubTokenAndContinue();
+										}
+									}}
+								/>
+							</div>
+							<Button
+								type="button"
+								variant="footer-primary"
+								disabled={githubTokenBusy || githubToken.trim() === ""}
+								onClick={() => void saveGitHubTokenAndContinue()}
+							>
+								{githubTokenBusy ? t("createProject.creating", { defaultValue: "Saving..." }) : t("createProject.continue", { defaultValue: "Continue →" })}
+							</Button>
+						</div>
+						{githubTokenError ? (
+							<p className="text-pretty text-[12px] leading-5 text-destructive" role="alert">
+								{githubTokenError}
+							</p>
+						) : null}
+					</div>
+					<div className="flex items-center justify-between gap-3">
+						<Button type="button" variant="footer" onClick={() => setStep("connect")}>
+							{t("createProject.back", { defaultValue: "Back" })}
+						</Button>
+					</div>
+				</div>
 			) : step === "agents" && org !== undefined ? (
 				<CloudAgentSetupStep
 					orgId={org.id}

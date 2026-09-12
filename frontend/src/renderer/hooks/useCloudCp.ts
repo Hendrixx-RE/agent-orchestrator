@@ -13,7 +13,6 @@
 
 import { useMemo } from "react";
 import { createCloudCpClient, type CloudCpClient } from "../lib/cloud-cp";
-import { createDemoCloudCpFetch, isCloudDemoModeEnabled } from "../lib/cloud-cp/demo-fetch";
 import { useCloudSession } from "../lib/cloud-session";
 import { useCloudGate } from "./useCloudGate";
 import { useSettings } from "./useSettings";
@@ -84,7 +83,7 @@ export function createRendererCloudCpClient(baseUrl: string): CloudCpClient {
 	return createCloudCpClient({
 		baseUrl,
 		getToken: async () => MAIN_PROCESS_TOKEN,
-		fetchImpl: isCloudDemoModeEnabled() ? createDemoCloudCpFetch(cloudCpFetch) : cloudCpFetch,
+		fetchImpl: cloudCpFetch,
 	});
 }
 
