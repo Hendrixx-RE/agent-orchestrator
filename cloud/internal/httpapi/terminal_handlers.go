@@ -351,17 +351,6 @@ func (s *Server) writeTerminalOutput(
 	defer ticker.Stop()
 	startupDeadline := time.NewTimer(terminalReadyTimeout)
 	defer startupDeadline.Stop()
-	// Retiring an epoch (a resume/repair connecting a replacement worker)
-	// never touches this terminal's ao_terminal_sessions row, so `state`
-	// alone would keep reading "open" for as long as terminalSessionTTL (30m)
-	// even though nothing is behind it any more. Without an active check here
-	// the only things that ever notice are a queued keystroke (immediate,
-	// but only if the user types) or the ping/pong keepalive eventually
-	// timing out (observed taking well over a minute) -- both leave an idle,
-	// silently-dead terminal open indefinitely. Poll epoch liveness on its
-	// own slow cadence so staleness is caught within seconds either way.
-	staleCheck := time.NewTicker(2 * time.Second)
-	defer staleCheck.Stop()
 	// With the stream enabled, a Postgres NOTIFY wakes this loop the moment a
 	// new output row commits; the ticker stays as the cross-replica and
 	// missed-notification fallback.
@@ -375,6 +364,18 @@ func (s *Server) writeTerminalOutput(
 	startingSent := false
 	ready := false
 	for {
+		// Retiring an epoch (a resume/repair connecting a replacement worker)
+		// never touches this terminal's ao_terminal_sessions row, so `state`
+		// below would keep reading "open" for as long as terminalSessionTTL
+		// (30m) even though nothing is behind it any more. upsertWorkerConnection
+		// notifies ao_terminal_output for every terminal it retires -- the same
+		// channel this loop already wakes on for new output -- so this check
+		// runs precisely when a retirement actually happens (or, absent the
+		// stream, on the existing 50ms fallback poll) rather than on a
+		// dedicated timer of its own.
+		if current, err := s.store.TerminalWorkerEpochCurrent(ctx, terminal); err == nil && !current {
+			return postgres.ErrWorkerSuperseded
+		}
 		frames, state, err := s.store.ListTerminalOutput(ctx, terminal, after, 100)
 		if err != nil {
 			return err
@@ -452,10 +453,6 @@ func (s *Server) writeTerminalOutput(
 			}
 		case <-wake:
 		case <-ticker.C:
-		case <-staleCheck.C:
-			if current, err := s.store.TerminalWorkerEpochCurrent(ctx, terminal); err == nil && !current {
-				return postgres.ErrWorkerSuperseded
-			}
 		}
 	}
 }
