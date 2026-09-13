@@ -1456,7 +1456,7 @@ describe("CreateProjectFlow cloud offering", () => {
 		});
 
 		await user.click(screen.getByRole("tab", { name: "Cloud" }));
-		await user.click(await screen.findByRole("button", { name: "Connect →" }));
+		await user.click(await screen.findByRole("button", { name: "Skip" }));
 		await user.type(screen.getByLabelText("Repository URL"), "https://github.com/acme/web-app");
 		await user.type(screen.getByLabelText("Project name"), "web-app");
 		await user.click(screen.getByRole("button", { name: "Next" }));
@@ -1486,7 +1486,7 @@ describe("CreateProjectFlow cloud offering", () => {
 		render(<CreateProjectFlow embedded mode="choose" {...noop} />, { wrapper: CloudTestProviders });
 
 		await user.click(screen.getByRole("tab", { name: "Cloud" }));
-		await user.click(await screen.findByRole("button", { name: "Connect →" }));
+		await user.click(await screen.findByRole("button", { name: "Skip" }));
 		await user.type(screen.getByLabelText("Repository URL"), "git@github.com:acme/web-app.git");
 		await user.type(screen.getByLabelText("Project name"), "web-app");
 		await user.click(screen.getByRole("button", { name: "Next" }));
@@ -1533,7 +1533,7 @@ describe("CreateProjectFlow cloud offering", () => {
 		render(<CreateProjectFlow embedded mode="choose" {...noop} />, { wrapper: CloudTestProviders });
 
 		await user.click(screen.getByRole("tab", { name: "Cloud" }));
-		await user.click(await screen.findByRole("button", { name: "Connect →" }));
+		await user.click(await screen.findByRole("button", { name: "Skip" }));
 		await user.type(screen.getByLabelText("Repository URL"), "https://github.com/acme/private-repo");
 		await user.type(screen.getByLabelText("Project name"), "private-repo");
 		await user.click(screen.getByRole("button", { name: "Next" }));

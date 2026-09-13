@@ -35,10 +35,22 @@ import { CloudCpError, type CloudCpProviderConnection } from "../lib/cloud-cp";
 import { useCloudSession } from "../lib/cloud-session";
 import { useCredentialDialogStore } from "../stores/credential-dialog-store";
 import { useUiStore } from "../stores/ui-store";
+import {
+	onboardingAlertErrorClass,
+	onboardingFieldHintClass,
+	onboardingFooterActionsClass,
+	onboardingFooterActionsEndClass,
+	onboardingFormLabelClass,
+	onboardingPanelBodyClass,
+	onboardingPanelClass,
+	onboardingPanelDescriptionClass,
+	onboardingPanelTitleClass,
+} from "../lib/onboarding-ui";
 import { cn } from "../lib/utils";
 import type { ProjectKind } from "../types/workspace";
 import { CreateProjectAgentSheet, RequiredAgentField, type CreateProjectAgentSelection } from "./CreateProjectAgentSheet";
 import CloneRepositoryDialog, { type CloneRepositoryDetails, type CloneRepositorySelection } from "./CloneRepositoryDialog";
+import { GitHubTokenField } from "./onboarding/GitHubTokenField";
 import { PathRow } from "./PathRow";
 import { Button } from "./ui/button";
 import { Checkbox } from "./ui/checkbox";
@@ -1204,12 +1216,10 @@ function CloudSignInPanel({
 }) {
 	const { t } = useTranslation();
 	return (
-		<div className="flex w-full max-w-(--size-import-modal-max) flex-col items-center gap-4 rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-modal)] p-(--size-import-modal-padding) text-center shadow-[var(--shadow-import-modal)]">
-			<Cloud className="size-6 text-[var(--color-text-import-title)]" aria-hidden="true" />
-			<p className="text-[13px] leading-5 text-[var(--color-text-import-subtitle)]">
-				{t("createProject.cloudSignInPrompt")}
-			</p>
-			<Button disabled={disabled} onClick={onSignIn} type="button">
+		<div className={cn(onboardingPanelClass, "flex flex-col items-center gap-4 px-4 py-6 text-center")}>
+			<Cloud className="size-6 text-foreground" aria-hidden="true" />
+			<p className="text-[13px] leading-5 text-muted-foreground">{t("createProject.cloudSignInPrompt")}</p>
+			<Button disabled={disabled} onClick={onSignIn} type="button" variant="footer-primary">
 				{t("shell.signInToAOCloud")}
 			</Button>
 		</div>
@@ -1302,17 +1312,14 @@ function CloudAgentSetupStep({
 
 	return (
 		<div className="flex flex-col gap-5">
-			<div className="flex flex-col gap-1 rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] px-4 py-3">
+			<div className="flex flex-col gap-1 rounded-lg border border-border/50 bg-[var(--color-bg-import-card)] px-4 py-3">
 				<span className="truncate text-[13px] font-medium text-[var(--color-text-import-title)]">{displayName}</span>
-				<span className="truncate font-mono text-[11.5px] text-[var(--color-text-import-muted)]">
+				<span className="truncate font-mono text-[11.5px] text-muted-foreground">
 					{repositoryUrl} · {defaultBranch}
 				</span>
 			</div>
 			{createError ? (
-				<div
-					className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-pretty text-[12px] leading-5 text-destructive"
-					role="alert"
-				>
+				<div className={onboardingAlertErrorClass} role="alert">
 					{createError}
 				</div>
 			) : null}
@@ -1342,7 +1349,7 @@ function CloudAgentSetupStep({
 					{t("createProject.addAgentCredential", { defaultValue: "Add a coding agent credential →" })}
 				</button>
 			) : null}
-			<div className="flex items-center justify-between gap-3">
+			<div className={onboardingFooterActionsClass}>
 				<Button type="button" variant="footer" onClick={onBack} disabled={isCreating}>
 					{t("createProject.back", { defaultValue: "Back" })}
 				</Button>
@@ -1378,22 +1385,22 @@ function CloudConnectCodeStep({
 	const { t } = useTranslation();
 	return (
 		<div className="flex flex-col gap-5">
-			<p className="import-description text-pretty">
+			<p className={onboardingFieldHintClass}>
 				{t("createProject.connectCodeDescription", {
 					defaultValue: "Every change comes back as a pull request you approve. Nothing is pushed without you.",
 				})}
 			</p>
 			<div className="grid gap-3 sm:grid-cols-2">
-				<div className="flex flex-col gap-3 rounded-lg border border-[var(--color-accent-import,#4d8dff)] bg-[var(--color-bg-import-card)] p-4">
+				<div className="flex flex-col gap-3 rounded-lg border border-primary/40 bg-[var(--color-bg-import-card)] p-4">
 					<div className="flex flex-wrap items-center gap-2">
-						<span className="text-[13px] font-semibold text-[var(--color-text-import-title)]">
+						<span className={onboardingFormLabelClass}>
 							{t("createProject.useTokenTitle", { defaultValue: "Use a token" })}
 						</span>
-						<span className="rounded bg-[var(--color-accent-import,#4d8dff)] px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wide text-white">
+						<span className="rounded bg-primary px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wide text-primary-foreground">
 							{t("createProject.useTokenBadge", { defaultValue: "Easiest" })}
 						</span>
 					</div>
-					<p className="text-pretty text-[12px] leading-5 text-[var(--color-text-import-muted)]">
+					<p className={onboardingFieldHintClass}>
 						{t("createProject.useTokenDescription", {
 							defaultValue: "Works on any server, and you don't need an org admin.",
 						})}
@@ -1402,16 +1409,16 @@ function CloudConnectCodeStep({
 						{t("createProject.connect", { defaultValue: "Connect →" })}
 					</Button>
 				</div>
-				<div className="flex flex-col gap-3 rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-4">
-					<span className="text-[13px] font-semibold text-[var(--color-text-import-title)]">
+				<div className="flex flex-col gap-3 rounded-lg border border-border/50 bg-[var(--color-bg-import-card)] p-4">
+					<span className={onboardingFormLabelClass}>
 						{t("createProject.installAppTitle", { defaultValue: "Install GitHub App" })}
 					</span>
-					<p className="text-pretty text-[12px] leading-5 text-[var(--color-text-import-muted)]">
+					<p className={onboardingFieldHintClass}>
 						{t("createProject.installAppDescription", {
 							defaultValue: "Pick exact repos, access expires on its own, and we can watch PRs and CI.",
 						})}
 					</p>
-					<p className="text-pretty text-[11px] leading-4 text-[var(--color-text-import-muted)]">
+					<p className="text-pretty text-[11px] leading-4 text-muted-foreground">
 						{t("createProject.installAppHint", { defaultValue: "Needs a GitHub App configured on this deployment." })}
 					</p>
 					<Button type="button" variant="footer" className="mt-auto" onClick={onInstallApp}>
@@ -1419,13 +1426,13 @@ function CloudConnectCodeStep({
 					</Button>
 				</div>
 			</div>
-			<div className="flex items-center justify-between gap-3">
+			<div className={onboardingFooterActionsClass}>
 				<span />
 				<Button type="button" variant="footer" onClick={onSkip}>
 					{t("createProject.skip", { defaultValue: "Skip" })}
 				</Button>
 			</div>
-			<p className="text-pretty text-[11.5px] leading-5 text-[var(--color-text-import-muted)]">
+			<p className="text-pretty text-[11.5px] leading-5 text-muted-foreground">
 				{t("createProject.connectCodeSkipped", { defaultValue: "Already connected? This screen is skipped from here on." })}
 			</p>
 		</div>
@@ -1567,28 +1574,28 @@ function CloudProjectCard({
 		}
 	};
 
-	const title = <h2 className="import-title text-balance">{t("createProject.cloudTitle")}</h2>;
-	const description = <p className="import-description text-pretty">{t("createProject.cloudDescription")}</p>;
+	const title = <span className="text-balance">{t("createProject.cloudTitle")}</span>;
+	const description = <span className="text-pretty">{t("createProject.cloudDescription")}</span>;
 
 	return (
-		<div className="relative isolate flex w-full max-w-(--size-import-modal-max) flex-col items-stretch gap-6 rounded-welcome-panel border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-modal)] p-(--size-import-modal-padding) shadow-[var(--shadow-import-modal)]">
-			<div className={cn("flex flex-col items-start gap-1", dialog && onClose && "pr-10")}>
+		<div className={onboardingPanelClass}>
+			<div className={cn("flex flex-col items-start", dialog && onClose && "pr-10")}>
 				{dialog ? (
 					<>
-						<Dialog.Title asChild>{title}</Dialog.Title>
-						<Dialog.Description asChild>{description}</Dialog.Description>
+						<Dialog.Title className={onboardingPanelTitleClass}>{title}</Dialog.Title>
+						<Dialog.Description className={onboardingPanelDescriptionClass}>{description}</Dialog.Description>
 					</>
 				) : (
 					<>
-						{title}
-						{description}
+						<h2 className={onboardingPanelTitleClass}>{title}</h2>
+						<p className={onboardingPanelDescriptionClass}>{description}</p>
 					</>
 				)}
 			</div>
 			{dialog && onClose ? (
 				<button
 					type="button"
-					className="settings-close-button absolute right-4 top-4"
+					className="settings-close-button absolute right-3 top-3"
 					aria-label={t("createProject.closeDialog")}
 					disabled={isCreating}
 					onClick={onClose}
@@ -1596,9 +1603,10 @@ function CloudProjectCard({
 					<X className="size-4" aria-hidden="true" />
 				</button>
 			) : null}
+			<div className={onboardingPanelBodyClass}>
 			{step === "connect" && githubConnection.isPending ? (
 				<div className="flex min-h-[160px] items-center justify-center">
-					<span className="text-[12px] text-[var(--color-text-import-muted)]">
+					<span className="text-[12px] text-muted-foreground">
 						{t("createProject.loading", { defaultValue: "Loading..." })}
 					</span>
 				</div>
@@ -1617,57 +1625,28 @@ function CloudProjectCard({
 				/>
 			) : step === "github_token" ? (
 				<div className="flex flex-col gap-5">
-					<p className="import-description text-pretty">
+					<p className={onboardingFieldHintClass}>
 						{t("createProject.githubTokenDescription", { defaultValue: "Connect your GitHub account using a personal access token." })}
 					</p>
-					<div className="flex flex-col gap-2 rounded-lg border border-[var(--color-border-import-modal)] bg-[var(--color-bg-import-card)] p-4">
-						<Label htmlFor="cloudGithubTokenSetup" className="text-[13px] font-semibold text-[var(--color-text-import-title)]">
-							{t("createProject.githubTokenLabel", { defaultValue: "GitHub token" })}
-						</Label>
-						<p className="text-pretty text-[12px] leading-5 text-[var(--color-text-import-muted)]">
-							{t("createProject.githubTokenHint", {
-								defaultValue: "Needs Contents: read and write on this repository.",
-							})}
-						</p>
-						<div className="flex items-center gap-2">
-							<div className="relative flex-1">
-								<span className="pointer-events-none absolute inset-y-0 left-3 flex w-4 items-center justify-center text-[var(--color-text-import-muted)]">
-									<KeyRound className="size-4" aria-hidden="true" />
-								</span>
-								<Input
-									id="cloudGithubTokenSetup"
-									type="password"
-									autoComplete="off"
-									spellCheck={false}
-									className="bg-[var(--color-bg-import-card)] pl-10 font-mono text-[13px]"
-									placeholder="github_pat_…"
-									disabled={githubTokenBusy}
-									value={githubToken}
-									onChange={(event) => setGithubToken(event.target.value)}
-									onKeyDown={(event) => {
-										if (event.key === "Enter") {
-											event.preventDefault();
-											void saveGitHubTokenAndContinue();
-										}
-									}}
-								/>
-							</div>
-							<Button
-								type="button"
-								variant="footer-primary"
-								disabled={githubTokenBusy || githubToken.trim() === ""}
-								onClick={() => void saveGitHubTokenAndContinue()}
-							>
-								{githubTokenBusy ? t("createProject.creating", { defaultValue: "Saving..." }) : t("createProject.continue", { defaultValue: "Continue →" })}
-							</Button>
-						</div>
-						{githubTokenError ? (
-							<p className="text-pretty text-[12px] leading-5 text-destructive" role="alert">
-								{githubTokenError}
-							</p>
-						) : null}
-					</div>
-					<div className="flex items-center justify-between gap-3">
+					<GitHubTokenField
+						id="cloudGithubTokenSetup"
+						label={t("createProject.githubTokenLabel", { defaultValue: "GitHub token" })}
+						hint={t("createProject.githubTokenHint", {
+							defaultValue: "Needs Contents: read and write on this repository.",
+						})}
+						value={githubToken}
+						disabled={githubTokenBusy}
+						error={githubTokenError}
+						submitLabel={
+							githubTokenBusy
+								? t("createProject.creating", { defaultValue: "Saving..." })
+								: t("createProject.continue", { defaultValue: "Continue →" })
+						}
+						submitDisabled={githubTokenBusy}
+						onChange={setGithubToken}
+						onSubmit={() => void saveGitHubTokenAndContinue()}
+					/>
+					<div className={onboardingFooterActionsClass}>
 						<Button type="button" variant="footer" onClick={() => setStep("connect")}>
 							{t("createProject.back", { defaultValue: "Back" })}
 						</Button>
@@ -1687,18 +1666,12 @@ function CloudProjectCard({
 			) : (
 				<form className="flex flex-col gap-5" onSubmit={goToAgentStep}>
 					{(submitError ?? orgFailure) ? (
-						<div
-							className="rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-pretty text-[12px] leading-5 text-destructive"
-							role="alert"
-						>
+						<div className={onboardingAlertErrorClass} role="alert">
 							{submitError ?? orgFailure}
 						</div>
 					) : null}
 					<div className="space-y-2">
-						<Label
-							htmlFor="cloudRepositoryUrl"
-							className="text-[13px] font-semibold text-[var(--color-text-import-title)]"
-						>
+						<Label htmlFor="cloudRepositoryUrl" className={onboardingFormLabelClass}>
 							{t("createProject.cloneRepositoryUrl")}
 						</Label>
 						<div className="relative">
@@ -1730,56 +1703,30 @@ function CloudProjectCard({
 						) : null}
 					</div>
 					{repositoryUnreachable ? (
-						<div className="flex flex-col gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
-							<Label htmlFor="cloudGithubToken" className="text-[13px] font-semibold text-[var(--color-text-import-title)]">
-								{t("createProject.githubTokenLabel", { defaultValue: "GitHub token" })}
-							</Label>
-							<p className="text-pretty text-[12px] leading-5 text-[var(--color-text-import-muted)]">
-								{t("createProject.githubTokenHint", {
-									defaultValue: "Needs Contents: read and write on this repository.",
-								})}
-							</p>
-							<div className="flex items-center gap-2">
-								<div className="relative flex-1">
-									<span className="pointer-events-none absolute inset-y-0 left-3 flex w-4 items-center justify-center text-[var(--color-text-import-muted)]">
-										<KeyRound className="size-4" aria-hidden="true" />
-									</span>
-									<Input
-										id="cloudGithubToken"
-										type="password"
-										autoComplete="off"
-										spellCheck={false}
-										className="bg-[var(--color-bg-import-card)] pl-10 font-mono text-[13px]"
-										placeholder="github_pat_…"
-										disabled={githubTokenBusy}
-										value={githubToken}
-										onChange={(event) => setGithubToken(event.target.value)}
-									/>
-								</div>
-								<Button
-									type="button"
-									variant="footer"
-									disabled={githubTokenBusy || githubToken.trim() === ""}
-									onClick={() => void saveGitHubTokenAndRetry()}
-								>
-									{githubTokenBusy
-										? t("createProject.creating")
-										: t("createProject.saveAndRetry", { defaultValue: "Save and retry" })}
-								</Button>
-							</div>
-							{githubTokenError ? (
-								<p className="text-pretty text-[12px] leading-5 text-destructive" role="alert">
-									{githubTokenError}
-								</p>
-							) : null}
-						</div>
+						<GitHubTokenField
+							id="cloudGithubToken"
+							tone="warning"
+							label={t("createProject.githubTokenLabel", { defaultValue: "GitHub token" })}
+							hint={t("createProject.githubTokenHint", {
+								defaultValue: "Needs Contents: read and write on this repository.",
+							})}
+							value={githubToken}
+							disabled={githubTokenBusy}
+							error={githubTokenError}
+							submitVariant="footer"
+							submitLabel={
+								githubTokenBusy
+									? t("createProject.creating")
+									: t("createProject.saveAndRetry", { defaultValue: "Save and retry" })
+							}
+							submitDisabled={githubTokenBusy}
+							onChange={setGithubToken}
+							onSubmit={() => void saveGitHubTokenAndRetry()}
+						/>
 					) : null}
 					<div className="grid gap-5 sm:grid-cols-2">
 						<div className="space-y-2">
-							<Label
-								htmlFor="cloudDisplayName"
-								className="text-[13px] font-semibold text-[var(--color-text-import-title)]"
-							>
+							<Label htmlFor="cloudDisplayName" className={onboardingFormLabelClass}>
 								{t("createProject.cloudDisplayName")}
 							</Label>
 							<div className="relative">
@@ -1806,10 +1753,7 @@ function CloudProjectCard({
 							) : null}
 						</div>
 						<div className="space-y-2">
-							<Label
-								htmlFor="cloudDefaultBranch"
-								className="text-[13px] font-semibold text-[var(--color-text-import-title)]"
-							>
+							<Label htmlFor="cloudDefaultBranch" className={onboardingFormLabelClass}>
 								{t("createProject.cloudDefaultBranch")}
 							</Label>
 							<div className="relative">
@@ -1841,9 +1785,9 @@ function CloudProjectCard({
 							) : null}
 						</div>
 					</div>
-					<div className="flex items-center justify-end gap-3">
+					<div className={onboardingFooterActionsEndClass}>
 						{org === undefined && orgFailure === null ? (
-							<p className="mr-auto text-pretty text-[12px] leading-5 text-[var(--color-text-import-muted)]" role="status">
+							<p className="mr-auto text-pretty text-[12px] leading-5 text-muted-foreground" role="status">
 								{t("createProject.cloudWorkspaceConnecting")}
 							</p>
 						) : null}
@@ -1853,6 +1797,7 @@ function CloudProjectCard({
 					</div>
 				</form>
 			)}
+			</div>
 		</div>
 	);
 }
@@ -1891,20 +1836,18 @@ function ImportSourcePicker({
 		},
 	];
 	return (
-		<div className="relative w-full max-w-[520px] overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-xl">
+		<div className={onboardingPanelClass}>
 			{dialog ? (
-				<Dialog.Title className="settings-dialog-title px-4 pt-3">{t("createProject.addCodeTitle")}</Dialog.Title>
+				<Dialog.Title className={onboardingPanelTitleClass}>{t("createProject.addCodeTitle")}</Dialog.Title>
 			) : (
-				<h2 className="settings-dialog-title px-4 pt-3">{t("createProject.addCodeTitle")}</h2>
+				<h2 className={onboardingPanelTitleClass}>{t("createProject.addCodeTitle")}</h2>
 			)}
 			{dialog ? (
-				<Dialog.Description className="px-4 pb-3 pt-1 text-[13px] leading-5 text-muted-foreground">
+				<Dialog.Description className={onboardingPanelDescriptionClass}>
 					{t("createProject.addCodeDescription")}
 				</Dialog.Description>
 			) : (
-				<p className="px-4 pb-3 pt-1 text-[13px] leading-5 text-muted-foreground">
-					{t("createProject.addCodeDescription")}
-				</p>
+				<p className={onboardingPanelDescriptionClass}>{t("createProject.addCodeDescription")}</p>
 			)}
 			<div className="mx-4 mb-4 overflow-hidden rounded-md border border-border/50 bg-[var(--color-bg-import-modal)]">
 				<div className="flex flex-col divide-y divide-border/50">

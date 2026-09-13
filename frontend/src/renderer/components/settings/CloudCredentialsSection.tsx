@@ -2,8 +2,8 @@ import { KeyRound } from "lucide-react";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
+import { GitHubTokenField } from "../onboarding/GitHubTokenField";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
 import { useCloudGate } from "../../hooks/useCloudGate";
 import { useCloudCp } from "../../hooks/useCloudCp";
 import { useCloudOrg } from "../../hooks/useCloudOrg";
@@ -118,17 +118,28 @@ function CloudCredentialsSectionInner({ titleHidden }: { titleHidden?: boolean }
 					<SettingsRow key="github-pat" icon={KeyRound} label="GitHub private repositories">
 						<span className="text-sm leading-5 text-settings-muted">{githubPATConnected ? "Connected" : "Not connected"}</span>
 					</SettingsRow>
-					<p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-						Optional. Paste a GitHub personal access token with access to private repositories. It is encrypted and used only by Cloud workers when cloning GitHub repositories.
-					</p>
-					<div className="mt-2 flex items-center gap-2">
-						<Input type="password" autoComplete="off" spellCheck={false} value={githubPAT} onChange={(event) => setGitHubPAT(event.target.value)} placeholder="github_pat_…" />
-						<Button type="button" variant="footer" disabled={githubPATBusy || githubPAT.trim() === ""} onClick={() => void saveGitHubPAT()}>
-							{githubPATBusy ? "Saving…" : "Save token"}
-						</Button>
-						{githubPATConnected ? <Button type="button" variant="footer" disabled={githubPATBusy} onClick={() => void removeGitHubPAT()}>Remove</Button> : null}
-					</div>
-					{githubPATError ? <p role="alert" className="mt-2 text-xs text-error">{githubPATError}</p> : null}
+					<GitHubTokenField
+						id="settings-github-pat"
+						bare
+						className="mt-2"
+						label="GitHub token"
+						hint="Optional. Paste a GitHub personal access token with access to private repositories. It is encrypted and used only by Cloud workers when cloning GitHub repositories."
+						value={githubPAT}
+						disabled={githubPATBusy}
+						error={githubPATError}
+						submitLabel={githubPATBusy ? "Saving…" : "Save token"}
+						submitVariant="footer"
+						submitDisabled={githubPATBusy}
+						onChange={setGitHubPAT}
+						onSubmit={() => void saveGitHubPAT()}
+					/>
+					{githubPATConnected ? (
+						<div className="mt-2 flex justify-end">
+							<Button type="button" variant="footer" disabled={githubPATBusy} onClick={() => void removeGitHubPAT()}>
+								Remove
+							</Button>
+						</div>
+					) : null}
 				</div>
 			</div>
 		</SettingsSection>
