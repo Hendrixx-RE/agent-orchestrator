@@ -30,7 +30,14 @@ import { agentModelsQueryOptions } from "../hooks/useAgentModelsQuery";
 import { useDaemonStatus } from "../hooks/useDaemonStatus";
 import { useOpenShellTerminal } from "../hooks/useShellTerminals";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
-import { useWorkspaceQuery, workspaceQueryKey, workspaceQueryOptions, workspaceStatusesChecking } from "../hooks/useWorkspaceQuery";
+import {
+	cloudProjectsQueryKey,
+	cloudSessionsQueryKey,
+	useWorkspaceQuery,
+	workspaceQueryKey,
+	workspaceQueryOptions,
+	workspaceStatusesChecking,
+} from "../hooks/useWorkspaceQuery";
 import { apiClient, apiErrorCode, apiErrorDetails, apiErrorMessage, apiErrorRequestId, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { refreshDaemonStatus } from "../lib/daemon-status";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
@@ -52,7 +59,13 @@ import {
 } from "../lib/platform";
 import { sidebarIsVisible, sidebarOccupiesLayout, useUiStore } from "../stores/ui-store";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
-import { sessionIsActive, STANDALONE_WORKSPACE_ID, toProjectKind, type WorkspaceSummary } from "../types/workspace";
+import {
+	CLOUD_PROJECT_KIND,
+	sessionIsActive,
+	STANDALONE_WORKSPACE_ID,
+	toProjectKind,
+	type WorkspaceSummary,
+} from "../types/workspace";
 import type { components } from "../../api/schema";
 import { useAgentInventoryTelemetry } from "../hooks/useAgentInventoryTelemetry";
 import { useCloudCp } from "../hooks/useCloudCp";
