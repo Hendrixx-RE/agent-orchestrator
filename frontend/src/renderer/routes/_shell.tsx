@@ -30,7 +30,15 @@ import { agentModelsQueryOptions } from "../hooks/useAgentModelsQuery";
 import { useDaemonStatus } from "../hooks/useDaemonStatus";
 import { useOpenShellTerminal } from "../hooks/useShellTerminals";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
-import { useWorkspaceQuery, workspaceQueryKey, workspaceQueryOptions } from "../hooks/useWorkspaceQuery";
+import {
+	cloudProjectsQueryKey,
+	cloudSessionsQueryKey,
+	useWorkspaceQuery,
+	workspaceQueryKey,
+	workspaceQueryOptions,
+} from "../hooks/useWorkspaceQuery";
+import { useCloudCp } from "../hooks/useCloudCp";
+import { useCloudOrg } from "../hooks/useCloudOrg";
 import { apiClient, apiErrorCode, apiErrorDetails, apiErrorMessage, apiErrorRequestId, hasTrustedApiBaseUrl } from "../lib/api-client";
 import { refreshDaemonStatus } from "../lib/daemon-status";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
@@ -52,7 +60,7 @@ import {
 } from "../lib/platform";
 import { sidebarIsVisible, sidebarOccupiesLayout, useUiStore } from "../stores/ui-store";
 import { matchesRendererShortcut } from "../stores/keybindings-store";
-import { sessionIsActive, toProjectKind, type WorkspaceSummary } from "../types/workspace";
+import { CLOUD_PROJECT_KIND, sessionIsActive, toProjectKind, type WorkspaceSummary } from "../types/workspace";
 import type { components } from "../../api/schema";
 import { useAgentInventoryTelemetry } from "../hooks/useAgentInventoryTelemetry";
 
@@ -169,6 +177,8 @@ function ShellLayout() {
 	const queryClient = useQueryClient();
 	const workspaceQuery = useWorkspaceQuery();
 	const workspaces = workspaceQuery.data ?? [];
+	const { client: cloudCpClient, ready: cloudCpReady } = useCloudCp();
+	const { org: cloudOrg } = useCloudOrg();
 	// Global shortcut listeners need the latest workspace list, but recreating
 	// those subscriptions for every streamed activity update is avoidable.
 	const workspacesRef = useRef(workspaces);
@@ -643,6 +653,39 @@ function ShellLayout() {
 				surface: "project_board",
 				project_id: projectId,
 			});
+			// Cloud projects have no record in the local daemon's SQLite store (they
+			// are merged into the workspace list purely client-side from the
+			// control-plane project query — see useCloudProjectsQuery), so removing
+			// one has to go through the control plane's deleteProject instead of the
+			// local daemon's /api/v1/projects/{id}. Calling the local route for a
+			// cloud project id 404s ("Unknown project"), which used to surface as a
+			// stray error line under the project row while the row itself never
+			// disappeared.
+			const target = workspaces.find((item) => item.id === projectId);
+			if (target?.kind === CLOUD_PROJECT_KIND) {
+				if (!cloudCpReady || cloudOrg === undefined) {
+					throw new Error(t("settings.project.degraded"));
+				}
+				try {
+					await cloudCpClient.deleteProject(cloudOrg.id, projectId);
+				} catch (err) {
+					const failure = new Error(apiErrorMessage(err)) as Error & { code?: string };
+					void captureRendererException(failure, {
+						source: "project-remove",
+						operation: "project_remove",
+						surface: "project_board",
+						project_id: projectId,
+					});
+					throw failure;
+				}
+				void captureRendererEvent("ao.renderer.project_removed", { project_id: projectId });
+				await queryClient.invalidateQueries({ queryKey: cloudProjectsQueryKey });
+				await queryClient.invalidateQueries({ queryKey: cloudSessionsQueryKey });
+				if (isLastWorkspace) {
+					void navigate({ to: "/" });
+				}
+				return;
+			}
 			const { error } = await apiClient.DELETE("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
 			});
@@ -663,7 +706,7 @@ function ShellLayout() {
               void navigate({ to: "/" });
 }
 		},
-		[navigate, updateWorkspaces, workspaces],
+		[cloudCpClient, cloudCpReady, cloudOrg, navigate, queryClient, t, updateWorkspaces, workspaces],
 	);
 
 	const restartOrchestrator = useCallback(
