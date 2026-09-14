@@ -59,18 +59,15 @@ export function SettingsDialog() {
 
 	const globalSections = visibleGlobalSettings({ cloudEnabled });
 
-	// Cloud projects only support identity + default branch (see
-	// CloudProjectSettingsForm); the worker/orchestrator agent, reviewer, and
-	// tracker-intake settings are local-daemon-only concepts with no
-	// control-plane equivalent yet, so those nav entries don't apply.
-	const projectSections: Array<{ id: ProjectSettingsSection; label: string; icon: LucideIcon }> = isCloudProject
-		? [{ id: "general", label: t("settings.project.identity"), icon: MonitorCog }]
-		: [
-				{ id: "general", label: t("settings.project.identity"), icon: MonitorCog },
-				{ id: "agents", label: t("settings.project.agents"), icon: Bot },
-				{ id: "workflow", label: t("settings.project.workflow"), icon: GitBranch },
-				{ id: "intake", label: t("settings.project.intake"), icon: Inbox },
-			];
+	// Cloud projects use the same project-spec navigation as local projects.
+	// CloudProjectSettingsForm renders each section read-only from the
+	// control-plane response; local projects retain their editable form.
+	const projectSections: Array<{ id: ProjectSettingsSection; label: string; icon: LucideIcon }> = [
+		{ id: "general", label: t("settings.project.identity"), icon: MonitorCog },
+		{ id: "agents", label: t("settings.project.agents"), icon: Bot },
+		{ id: "workflow", label: t("settings.project.workflow"), icon: GitBranch },
+		{ id: "intake", label: t("settings.project.intake"), icon: Inbox },
+	];
 
 	const isProjectSettings = displaySettings?.scope === "project";
 	const [activeSection, setActiveSection] = useState<GlobalSettingsSection>("general");
@@ -165,7 +162,7 @@ export function SettingsDialog() {
 										/>
 									))}
 						</nav>
-						{isProjectSettings && (
+						{isProjectSettings && !isCloudProject && (
 							<div className="mt-auto flex flex-col gap-2 border-t border-(--color-border-settings-dialog-header) p-3">
 								<Button
 									type="submit"
@@ -232,7 +229,7 @@ export function SettingsDialog() {
 									isCloudProject ? (
 										<CloudProjectSettingsForm
 											projectId={displaySettings.projectId}
-											onSaveState={setProjectSaveState}
+											section={activeProjectSection}
 										/>
 									) : (
 										<ProjectSettingsForm

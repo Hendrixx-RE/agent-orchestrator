@@ -82,17 +82,18 @@ describe("SettingsDialog", () => {
 		expect(useUiStore.getState().settingsModal).toEqual({ scope: "project", projectId: "proj-1" });
 	});
 
-	it("routes a cloud project to the cloud settings form with only Identity in the nav", async () => {
+	it("routes a cloud project to the read-only cloud settings form with the full project-spec nav", async () => {
 		workspaceQueryDataMock.mockReturnValue([{ id: "cloud-proj-1", kind: "cloud" }]);
 		useUiStore.getState().openProjectSettings("cloud-proj-1");
 		renderSettingsDialog();
 
 		expect(await screen.findByTestId("cloud-project-settings-form")).toHaveTextContent("cloud-proj-1");
 		expect(screen.queryByRole("button", { name: "Start pending save" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
 		expect(screen.getByRole("button", { name: "Identity" })).toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Agents" })).not.toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Workflow" })).not.toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Intake" })).not.toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Agents" })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Workflow" })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Intake" })).toBeInTheDocument();
 	});
 
 	it("keeps a local project on the local settings form with the full nav", async () => {
