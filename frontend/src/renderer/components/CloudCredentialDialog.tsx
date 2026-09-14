@@ -143,19 +143,19 @@ export function CloudCredentialDialog() {
 					</button>
 				</DialogClose>
 
-				<DialogTitle className="settings-dialog-title px-4 pr-12 pt-3">{t("cloudCredential.title")}</DialogTitle>
-				<DialogDescription className="px-4 pr-12 pb-3 pt-0.5 text-caption leading-4 text-muted-foreground">
+				<DialogTitle className="px-4 pr-12 pt-3 text-balance text-[18px] font-semibold text-[var(--color-text-import-title)]">{t("cloudCredential.title")}</DialogTitle>
+				<DialogDescription className="px-4 pr-12 pt-1 text-pretty text-[13px] leading-5 text-muted-foreground">
 					{t("cloudCredential.description")}
 				</DialogDescription>
 
 				{phase === "success" ? (
-					<div className="px-4 pb-4">
+					<div className="min-h-0 overflow-y-auto px-4 pb-1 pt-4">
 						<p role="status" className="text-control leading-4 text-success">
 							{t("cloudCredential.connected")}
 						</p>
 					</div>
 				) : (
-					<div className="flex flex-col gap-4 px-4 pb-4">
+					<div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-4 pb-1 pt-4">
 						<div className="space-y-2">
 							<Label htmlFor="cloud-cred-agent" className={onboardingFormLabelClass}>
 								{t("cloudCredential.agentLabel")}
@@ -230,12 +230,12 @@ export function CloudCredentialDialog() {
 
 				<div className={cn(onboardingFooterActionsEndClass, "px-4 pb-4")}>
 					<DialogClose asChild>
-						<Button type="button" variant="footer" disabled={busy}>
+						<Button type="button" variant="outline" disabled={busy}>
 							{phase === "success" ? t("cloudCredential.done") : t("cloudCredential.cancel")}
 						</Button>
 					</DialogClose>
 					{phase !== "success" ? (
-						<Button type="button" variant="footer-primary" disabled={!canSubmit} onClick={() => void submit()}>
+						<Button type="button" variant="primary" disabled={!canSubmit} onClick={() => void submit()}>
 							{phase === "submitting" ? t("cloudCredential.connecting") : t("cloudCredential.connect")}
 						</Button>
 					) : null}

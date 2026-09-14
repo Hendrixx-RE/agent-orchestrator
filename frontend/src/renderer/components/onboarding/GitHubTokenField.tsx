@@ -21,7 +21,8 @@ type GitHubTokenFieldProps = {
 	onSubmit?: () => void;
 	submitLabel: string;
 	submitDisabled?: boolean;
-	submitVariant?: "footer" | "footer-primary";
+	submitVariant?: "outline" | "primary";
+	showSubmitButton?: boolean;
 	tone?: "default" | "warning";
 	/** Omit the inset card shell (settings rows already provide framing). */
 	bare?: boolean;
@@ -41,7 +42,8 @@ export function GitHubTokenField({
 	onSubmit,
 	submitLabel,
 	submitDisabled = false,
-	submitVariant = "footer-primary",
+	submitVariant = "primary",
+	showSubmitButton = true,
 	tone = "default",
 	bare = false,
 	className,
@@ -81,7 +83,7 @@ export function GitHubTokenField({
 						}}
 					/>
 				</div>
-				{onSubmit ? (
+				{onSubmit && showSubmitButton ? (
 					<Button
 						type="button"
 						variant={submitVariant}

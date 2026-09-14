@@ -128,7 +128,7 @@ function CloudCredentialsSectionInner({ titleHidden }: { titleHidden?: boolean }
 						disabled={githubPATBusy}
 						error={githubPATError}
 						submitLabel={githubPATBusy ? "Saving…" : "Save token"}
-						submitVariant="footer"
+						submitVariant="outline"
 						submitDisabled={githubPATBusy}
 						onChange={setGitHubPAT}
 						onSubmit={() => void saveGitHubPAT()}

@@ -133,12 +133,12 @@ export function CloudLocalSignInDialog() {
 				</DialogClose>
 
 				<div className="flex items-center gap-2 px-4 pr-12 pt-3">
-					<DialogTitle className="settings-dialog-title">{t("cloudLocalAuth.title")}</DialogTitle>
-					<span className="rounded-full bg-muted px-2 py-0.5 text-caption font-medium uppercase tracking-wide text-muted-foreground">
+					<DialogTitle className="text-balance text-[18px] font-semibold text-[var(--color-text-import-title)]">{t("cloudLocalAuth.title")}</DialogTitle>
+					<span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
 						{t("cloudLocalAuth.devBadge")}
 					</span>
 				</div>
-				<DialogDescription className="px-4 pr-12 pb-3 pt-0.5 text-caption leading-4 text-muted-foreground">
+				<DialogDescription className="px-4 pr-12 pt-1 text-pretty text-[13px] leading-5 text-muted-foreground">
 					{t("cloudLocalAuth.description")}
 				</DialogDescription>
 
@@ -149,7 +149,7 @@ export function CloudLocalSignInDialog() {
 						setError(null);
 					}}
 				>
-					<div className="flex flex-col gap-4 px-4 pb-4">
+					<div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-4 pb-1 pt-4">
 						<TabsList className="w-full" aria-label={t("cloudLocalAuth.title")}>
 							<TabsTrigger value="signIn">{t("cloudLocalAuth.tabSignIn")}</TabsTrigger>
 							<TabsTrigger value="register">{t("cloudLocalAuth.tabRegister")}</TabsTrigger>
@@ -250,11 +250,11 @@ export function CloudLocalSignInDialog() {
 
 				<div className={cn(onboardingFooterActionsEndClass, "px-4 pb-4")}>
 					<DialogClose asChild>
-						<Button type="button" variant="footer" disabled={busy}>
+						<Button type="button" variant="outline" disabled={busy}>
 							{t("cloudLocalAuth.cancel")}
 						</Button>
 					</DialogClose>
-					<Button type="button" variant="footer-primary" disabled={!canSubmit} onClick={() => void submit()}>
+					<Button type="button" variant="primary" disabled={!canSubmit} onClick={() => void submit()}>
 						{phase === "submitting"
 							? t("cloudLocalAuth.working")
 							: mode === "signIn"
