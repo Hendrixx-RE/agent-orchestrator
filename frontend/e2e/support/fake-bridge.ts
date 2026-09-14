@@ -273,6 +273,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					getSession: async () => null,
 					signIn: async () => undefined,
 					signOut: async () => undefined,
+					connectProviderAuth: async () => undefined,
 					localAuthAvailable: async () => false,
 					localRegister: async () => {
 						throw new Error("local auth is unavailable in e2e");
@@ -803,6 +804,7 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					getSession: async () => null,
 					signIn: async () => undefined,
 					signOut: async () => undefined,
+					connectProviderAuth: async () => undefined,
 					localAuthAvailable: async () => false,
 					localRegister: async () => {
 						throw new Error("local auth is unavailable in e2e");
