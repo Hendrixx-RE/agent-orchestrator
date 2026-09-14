@@ -101,4 +101,5 @@ describe("buildMacAppMenuTemplate", () => {
 		);
 		expect(macViewSubmenu()).toContainEqual(expect.objectContaining({ role: "forceReload" }));
 	});
+
 });

@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ShellTerminal } from "../hooks/useShellTerminals";
 import { ShellTerminalTab } from "./ShellTerminalTab";
+import { TooltipProvider } from "./ui/tooltip";
 
 const { isWindowsPlatform } = vi.hoisted(() => ({ isWindowsPlatform: vi.fn(() => false) }));
 vi.mock("../lib/platform", () => ({ isWindowsPlatform }));
@@ -21,14 +22,16 @@ function renderTab(overrides: Partial<Parameters<typeof ShellTerminalTab>[0]> = 
 	const onClose = vi.fn();
 	const onRename = vi.fn();
 	render(
-		<ShellTerminalTab
-			isActive={false}
-			onClose={onClose}
-			onRename={onRename}
-			onSelect={onSelect}
-			shell={shell}
-			{...overrides}
-		/>,
+		<TooltipProvider>
+			<ShellTerminalTab
+				isActive={false}
+				onClose={onClose}
+				onRename={onRename}
+				onSelect={onSelect}
+				shell={shell}
+				{...overrides}
+			/>
+		</TooltipProvider>,
 	);
 	return { onSelect, onClose, onRename };
 }
@@ -91,11 +94,11 @@ describe("ShellTerminalTab rename", () => {
 		expect(onSelect).toHaveBeenCalledOnce();
 	});
 
-	it("swaps the terminal glyph for close on hover without reserving a trailing close column", () => {
+	it("keeps the terminal glyph visible while showing close on hover", () => {
 		renderTab({ appearance: "connected", isActive: true });
 
 		const closeButton = screen.getByRole("button", { name: "Close terminal ao" });
-		expect(closeButton.parentElement).toHaveClass("absolute", "left-2", "inset-y-0");
+		expect(closeButton.parentElement).toHaveClass("flex", "shrink-0", "pr-1");
 		expect(closeButton).toHaveClass(
 			"opacity-0",
 			"pointer-events-none",
@@ -103,9 +106,7 @@ describe("ShellTerminalTab rename", () => {
 		);
 		expect(closeButton).not.toHaveClass("transition-opacity", "transition-[opacity,background,color]");
 		expect(closeButton).not.toHaveClass("w-control-sm");
-		expect(screen.getByRole("tab", { name: "ao" }).querySelector("svg")).toHaveClass(
-			"group-hover:opacity-0",
-		);
+		expect(screen.getByRole("tab", { name: "ao" }).querySelector("svg")).not.toHaveClass("group-hover:opacity-0");
 		expect(screen.getByRole("tab", { name: "ao" })).toHaveAttribute("aria-selected", "true");
 	});
 

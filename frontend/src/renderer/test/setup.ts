@@ -100,9 +100,15 @@ if (typeof window !== "undefined") {
 		app: {
 			getVersion: async () => "0.0.0-test",
 			chooseDirectory: async () => null,
+			checkGitRepository: async () => true,
 			openExternal: async () => undefined,
 			scanImportFolder: async ({ path }: { path: string }) => ({ path, repos: [] }),
 			checkAncestorRepo: async () => undefined,
+			getRepositoryBranch: async () => undefined,
+			getGitHubLogin: async (_repoPath?: string) => "",
+			getCachedGitHubOwners: async () => [],
+			refreshGitHubOwners: async () => [],
+			checkGitHubRepositoryAvailability: async () => ({ available: true }),
 			getPathForFile: () => "",
 			onOpenFolderPath: () => () => undefined,
 			onNewSessionShortcut: () => () => undefined,
@@ -110,6 +116,7 @@ if (typeof window !== "undefined") {
 			onNewShellTerminalShortcut: () => () => undefined,
 			onCloseShellTerminalShortcut: () => () => undefined,
 			setCloseShellTerminalShortcutEnabled: () => undefined,
+			setChatDraftRisk: () => undefined,
 			onOpenSettingsShortcut: () => () => undefined,
 			onPreviousSessionShortcut: () => () => undefined,
 			onNextSessionShortcut: () => () => undefined,
@@ -165,6 +172,12 @@ if (typeof window !== "undefined") {
 		},
 		telemetry: {
 			getBootstrap: async () => null,
+			getPolicy: async () => ({ eventsEnabled: false, consentGeneration: "test", updatedAt: new Date(0).toISOString(), acknowledged: false, consentRenewalRequired: false, state: "applied", environmentVeto: true, durabilitySupported: false }),
+			setEventsEnabled: async () => ({ eventsEnabled: false, consentGeneration: "test", updatedAt: new Date(0).toISOString(), acknowledged: false, consentRenewalRequired: false, state: "applied", environmentVeto: true, durabilitySupported: false }),
+			onPolicy: () => () => false,
+			onClearQueues: () => () => false,
+			capture: async () => false,
+			signalAgentSwitchVisibility: () => false,
 		},
 		browser: {
 			nativeCompositionEnabled: true,
@@ -176,9 +189,9 @@ if (typeof window !== "undefined") {
 				canGoForward: false,
 				isLoading: false,
 			}),
-			setBounds: () => undefined,
-			setOverlayOpen: () => undefined,
-			navigate: async ({ viewId }: { viewId: string }) => ({
+		setBounds: () => undefined,
+		setOverlayOpen: () => undefined,
+		navigate: async ({ viewId }: { viewId: string }) => ({
 				viewId,
 				url: "",
 				title: "",
@@ -186,6 +199,8 @@ if (typeof window !== "undefined") {
 				canGoForward: false,
 				isLoading: false,
 			}),
+			historySuggestions: async () => [],
+			historyFavicon: async () => undefined,
 			clear: async (viewId: string) => ({
 				viewId,
 				url: "",
@@ -226,10 +241,20 @@ if (typeof window !== "undefined") {
 				canGoForward: false,
 				isLoading: false,
 			}),
+			captureScreenshot: async () => undefined,
+			downloads: {
+				list: async () => ({ downloads: [] }),
+				action: async () => ({ downloads: [] }),
+				clear: async () => ({ downloads: [] }),
+				onChanged: () => () => { /* no-op test subscription */ },
+			},
 			getTabs: async (viewId: string) => ({ viewId, activeTabId: "t1", tabs: [] }),
 			selectTab: async ({ viewId, tabId }) => ({ viewId, activeTabId: tabId, tabs: [] }),
 			closeTab: async ({ viewId }) => ({ viewId, activeTabId: "", tabs: [] }),
 			openTab: async ({ viewId }) => ({ viewId, activeTabId: "", tabs: [] }),
+			getProfile: async (viewId: string) => ({ viewId, profileId: null, temporary: true }),
+			showProfileMenu: async () => undefined,
+			selectProfile: async () => undefined,
 			notifyPanelUsed: () => undefined,
 			notifyPanelBlur: () => undefined,
 			onFocusLocation: () => () => undefined,
@@ -246,8 +271,26 @@ if (typeof window !== "undefined") {
 			onTabsState: () => () => undefined,
 			onAgentActivity: () => () => undefined,
 			onDevToolsState: () => () => undefined,
+			onProfileState: () => () => undefined,
+			onProfileManage: () => () => undefined,
 			onAnnotationSubmit: () => () => undefined,
 			onAnnotationCancel: () => () => undefined,
+		},
+		browserProfiles: {
+			list: async () => ({ profiles: [] }),
+			create: async (name: string) => {
+				const now = new Date().toISOString();
+				return { id: `test-${name}`, name, createdAt: now, updatedAt: now };
+			},
+			rename: async ({ id, name }: { id: string; name: string }) => {
+				const now = new Date().toISOString();
+				return { id, name, createdAt: now, updatedAt: now };
+			},
+			clear: async () => undefined,
+			delete: async () => undefined,
+			discoverImportSources: async () => ({ sources: [] }),
+			import: async () => ({ sourceName: "", entries: [] }),
+			onImportProgress: () => () => undefined,
 		},
 		notifications: {
 			show: async () => undefined,
@@ -282,6 +325,7 @@ if (typeof window !== "undefined") {
 			returnHome: async () => undefined,
 			download: async () => undefined,
 			install: async () => undefined,
+			isPostUpdateRelaunch: async () => false,
 			onStatus: () => () => undefined,
 		onTelemetry: () => () => undefined,
 		},
@@ -293,6 +337,13 @@ if (typeof window !== "undefined") {
 			getSession: async () => null,
 			signIn: async () => undefined,
 			signOut: async () => undefined,
+			localAuthAvailable: async () => false,
+			localRegister: async () => {
+				throw new Error("not available in tests");
+			},
+			localLogin: async () => {
+				throw new Error("not available in tests");
+			},
 			onSessionChanged: () => () => undefined,
 		},
 		cloudCp: {
