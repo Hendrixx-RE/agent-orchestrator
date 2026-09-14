@@ -153,6 +153,8 @@ vi.mock("../hooks/useWorkspaceQuery", () => ({
 	useWorkspaceTraySessions: () => ({ data: [] }),
 	workspaceQueryKey: ["workspaces"],
 	workspaceQueryOptions: {},
+	cloudProjectsQueryKey: ["cloud-projects"],
+	cloudSessionsQueryKey: ["cloud-sessions"],
 }));
 
 vi.mock("../hooks/useDaemonStatus", () => ({
@@ -176,6 +178,13 @@ vi.mock("../lib/daemon-status", () => ({
 // settings/query path out of the provider-free harness.
 vi.mock("../hooks/useCloudCp", () => ({
 	useCloudCp: () => ({ client: {}, ready: false, baseUrl: "" }),
+}));
+
+// removeProject reads the cloud org to route a cloud-kind project's deletion
+// to the control plane; useCloudOrg calls useQuery for real, which throws
+// without a live QueryClientProvider in this provider-free harness.
+vi.mock("../hooks/useCloudOrg", () => ({
+	useCloudOrg: () => ({ org: undefined, isLoading: false, error: undefined, ready: false }),
 }));
 
 // The shell layout opens standalone terminals; this suite only covers the
