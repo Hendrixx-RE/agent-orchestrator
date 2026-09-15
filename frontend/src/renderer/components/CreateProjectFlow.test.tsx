@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { useState, type ComponentProps, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CreateProjectFlow, type CloneProjectInput, type CreateProjectInput } from "./CreateProjectFlow";
-import { CloudCpAuthError, CloudCpError } from "../lib/cloud-cp";
+import { CloudCpError } from "../lib/cloud-cp";
 import { useUiStore } from "../stores/ui-store";
 
 const bridgeMocks = vi.hoisted(() => ({
