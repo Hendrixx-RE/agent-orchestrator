@@ -72,6 +72,7 @@ import {
 	refreshSlowDaemonStartupDetails,
 	slowDaemonStartupStatus,
 } from "./shared/daemon-startup-status";
+import { toggleAppDevTools } from "./main/app-devtools";
 import { attachAppShortcuts } from "./main/app-shortcuts";
 import {
 	KEYBOARD_SHORTCUTS_HELP_CHANNEL,
@@ -512,10 +513,7 @@ function buildWindowsAppMenu(): Menu {
 function buildLinuxAppMenu(): Menu {
 	return Menu.buildFromTemplate(
 		buildLinuxAppMenuTemplate(() => {
-			const fallback = () => getShellWebContents()?.toggleDevTools();
-			void browserViewHost?.toggleDevToolsForLastFocused().then((state) => {
-				if (!state) fallback();
-			}).catch(fallback);
+			void toggleAppDevTools(browserViewHost, getShellWebContents);
 		}),
 	);
 }
@@ -726,7 +724,7 @@ async function createWindowInternal(): Promise<void> {
 			shouldHandleAppShortcutInBrowserContext(id, chord, isMac),
 		(id) => {
 			if (id !== "toggle-browser-devtools") return;
-			void browserViewHost?.toggleDevToolsForLastFocused().catch(() => undefined);
+			void toggleAppDevTools(browserViewHost, getShellWebContents);
 		},
 		() => terminalFocused,
 	);
