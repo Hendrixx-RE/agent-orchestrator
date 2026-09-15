@@ -175,12 +175,28 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnprocessableEntity, "validation_error", "Project configuration is invalid.")
 		return
 	}
-	// Fail here, on a form field, rather than minutes later inside a sandbox at
-	// checkout time: an unreachable URL is rejected before any project row (or
-	// cloud sandbox) is created for it. A probe that cannot run at all (network
-	// hiccup reaching the remote, not the remote's own answer) fails open —
-	// see probeRepositoryReachable.
-	if !s.probeRepositoryReachable(r.Context(), request.RepositoryURL) {
+	principal := principalFrom(r)
+	userStore, ok := s.store.(userProviderConnectionStore)
+	if !ok {
+		writeError(w, r, http.StatusNotImplemented, "not_implemented", "Provider connections are unavailable.")
+		return
+	}
+	encrypted, nonce, err := userStore.UserProviderConnectionSecret(r.Context(), principal, githubPATProvider, defaultAgentConnectionLabel)
+	if err != nil {
+		s.logger.Error("fetch GitHub personal access token", "error", err, "request_id", requestID(r))
+		writeError(w, r, http.StatusUnprocessableEntity, "token_missing", "No GitHub personal access token found. Please add one first.")
+		return
+	}
+	secret, err := s.secretCipher.Decrypt(encrypted, nonce, providerSecretAssociatedData("user:"+principal.UserID, githubPATProvider))
+	if err != nil {
+		s.logger.Error("decrypt GitHub personal access token", "error", err, "request_id", requestID(r))
+		writeError(w, r, http.StatusInternalServerError, "internal_error", "Failed to decrypt the GitHub token.")
+		return
+	}
+	defer clear(secret)
+
+	reachable, _ := s.probeRepositoryAccess(r.Context(), request.RepositoryURL, string(secret))
+	if !reachable {
 		writeError(w, r, http.StatusUnprocessableEntity, "repository_unreachable", "Can't reach this repository — it may be private, or the URL may be wrong.")
 		return
 	}
@@ -640,6 +656,57 @@ func (s *Server) probeRepositoryReachable(ctx context.Context, repositoryURL str
 	defer func() { _ = response.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
 	return response.StatusCode == http.StatusOK
+}
+
+// probeRepositoryAccess asks the git smart-HTTP endpoint whether a repository
+// is reachable with the provided token, and checks for write vs read-only access.
+func (s *Server) probeRepositoryAccess(ctx context.Context, repositoryURL string, token string) (reachable bool, writeAccess bool) {
+	target := strings.TrimSuffix(repositoryURL, "/")
+	if !strings.HasSuffix(target, ".git") {
+		target += ".git"
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// Check write access
+	reqWrite, err := http.NewRequestWithContext(
+		probeCtx, http.MethodGet, target+"/info/refs?service=git-receive-pack", http.NoBody,
+	)
+	if err != nil {
+		return false, false
+	}
+	reqWrite.SetBasicAuth("git", token)
+	respWrite, err := s.repositoryProbeClient.Do(reqWrite)
+	if err != nil {
+		return false, false
+	}
+	defer func() { _ = respWrite.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(respWrite.Body, 4<<10))
+
+	if respWrite.StatusCode == http.StatusOK {
+		return true, true
+	}
+
+	// Check read access
+	reqRead, err := http.NewRequestWithContext(
+		probeCtx, http.MethodGet, target+"/info/refs?service=git-upload-pack", http.NoBody,
+	)
+	if err != nil {
+		return false, false
+	}
+	reqRead.SetBasicAuth("git", token)
+	respRead, err := s.repositoryProbeClient.Do(reqRead)
+	if err != nil {
+		return false, false
+	}
+	defer func() { _ = respRead.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(respRead.Body, 4<<10))
+
+	if respRead.StatusCode == http.StatusOK {
+		return true, false
+	}
+
+	return false, false
 }
 
 func validProjectInput(request createProjectRequest) bool {

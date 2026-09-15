@@ -81,6 +81,14 @@ type putGitHubPATRequest struct {
 	Secret string `json:"secret"`
 }
 
+type validateSavedRepositoryRequest struct {
+	RepositoryURL string `json:"repositoryUrl"`
+}
+
+type validateSavedRepositoryResponse struct {
+	WriteAccess bool `json:"writeAccess"`
+}
+
 type providerConnectionResponse struct {
 	ID              string         `json:"id"`
 	Provider        string         `json:"provider"`
@@ -299,6 +307,55 @@ func (s *Server) deleteGitHubPAT(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) validateSavedRepository(w http.ResponseWriter, r *http.Request) {
+	if s.secretCipher == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "provider_connections_unavailable", "GitHub credential storage is not configured.")
+		return
+	}
+	var request validateSavedRepositoryRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "The request body is invalid.")
+		return
+	}
+	request.RepositoryURL = strings.TrimSpace(request.RepositoryURL)
+	if request.RepositoryURL == "" {
+		writeError(w, r, http.StatusBadRequest, "invalid_request", "Repository URL is required.")
+		return
+	}
+
+	principal := principalFrom(r)
+	store, ok := s.store.(userProviderConnectionStore)
+	if !ok {
+		writeError(w, r, http.StatusNotImplemented, "not_implemented", "Provider connections are unavailable.")
+		return
+	}
+
+	encrypted, nonce, err := store.UserProviderConnectionSecret(r.Context(), principal, githubPATProvider, defaultAgentConnectionLabel)
+	if err != nil {
+		s.logger.Error("fetch GitHub personal access token", "error", err, "request_id", requestID(r))
+		writeError(w, r, http.StatusUnprocessableEntity, "token_missing", "No GitHub personal access token found. Please add one first.")
+		return
+	}
+
+	secret, err := s.secretCipher.Decrypt(encrypted, nonce, providerSecretAssociatedData("user:"+principal.UserID, githubPATProvider))
+	if err != nil {
+		s.logger.Error("decrypt GitHub personal access token", "error", err, "request_id", requestID(r))
+		writeError(w, r, http.StatusInternalServerError, "internal_error", "Failed to decrypt the GitHub token.")
+		return
+	}
+	defer clear(secret)
+
+	reachable, writeAccess := s.probeRepositoryAccess(r.Context(), request.RepositoryURL, string(secret))
+	if !reachable {
+		writeError(w, r, http.StatusUnprocessableEntity, "repository_unreachable", "Can't reach this repository — it may be private, or the URL may be wrong.")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, validateSavedRepositoryResponse{
+		WriteAccess: writeAccess,
+	})
+}
+
 func toProviderConnectionResponse(
 	connection domain.ProviderConnection,
 ) providerConnectionResponse {
@@ -330,6 +387,7 @@ type userProviderConnectionStore interface {
 		json.RawMessage,
 	) (domain.UserProviderConnection, error)
 	DeleteUserProviderConnection(context.Context, domain.Principal, string, string) error
+	UserProviderConnectionSecret(context.Context, domain.Principal, string, string) ([]byte, []byte, error)
 }
 
 type providerConnectionPromotionStore interface {

@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "motion/react";
 import { useTranslation } from "react-i18next";
 import {
@@ -1346,17 +1346,36 @@ function CloudProjectCard({
 	const { client } = useCloudCp();
 	const { org, error: orgError } = useCloudOrg();
 	const queryClient = useQueryClient();
-	const [step, setStep] = useState<"github" | "github_token" | "repository" | "agents">("github");
+	const [step, setStep] = useState<"github_token" | "repository" | "agents">("repository");
 	const [repositoryUrl, setRepositoryUrl] = useState("");
 	const [displayName, setDisplayName] = useState("");
 	const [defaultBranch, setDefaultBranch] = useState("main");
 	const [submitted, setSubmitted] = useState(false);
+	const [isValidating, setIsValidating] = useState(false);
 	const [isCreating, setIsCreating] = useState(false);
 	const [submitError, setSubmitError] = useState<string | null>(null);
-	// Set when createProject comes back "repository_unreachable" — the mockup's
-	// card D: a private repo (or a typo) is caught here, on the form, instead of
-	// minutes later inside a sandbox at checkout.
-	const [repositoryUnreachable, setRepositoryUnreachable] = useState(false);
+	const [submitIsUnreachable, setSubmitIsUnreachable] = useState(false);
+	const [readOnlyWarning, setReadOnlyWarning] = useState(false);
+	const userProviders = useQuery({
+		queryKey: ["cloud-user-providers"],
+		enabled: client !== undefined,
+		staleTime: 0,
+		refetchOnMount: "always",
+		queryFn: async () => {
+			const { providerConnections } = await client.listUserProviderConnections();
+			return providerConnections;
+		},
+	});
+
+	useEffect(() => {
+		// Wait until data is confirmed fresh — don't redirect while still loading,
+		// which would cause a flash of the repository step before the check completes.
+		if (userProviders.isPending || !userProviders.data) return;
+		const hasGithubPat = userProviders.data.some((c) => c.provider === "github");
+		if (!hasGithubPat && step === "repository") {
+			setStep("github_token");
+		}
+	}, [userProviders.isPending, userProviders.data, step]);
 	const [githubToken, setGithubToken] = useState("");
 	const [githubTokenBusy, setGithubTokenBusy] = useState(false);
 	const [githubTokenError, setGithubTokenError] = useState<string | null>(null);
@@ -1367,13 +1386,6 @@ function CloudProjectCard({
 	const urlError = submitted && !isHttpsRepositoryUrl(repositoryUrl) ? t("createProject.cloudInvalidUrl") : null;
 	const nameError = submitted && displayName.trim() === "" ? t("createProject.cloudDisplayNameRequired") : null;
 	const branchError = submitted && defaultBranch.trim() === "" ? t("createProject.cloudDefaultBranchRequired") : null;
-	const continueWithPublicRepository = () => {
-		setGithubToken("");
-		setGithubTokenError(null);
-		setSubmitError(null);
-		setRepositoryUnreachable(false);
-		setStep("repository");
-	};
 	const saveGitHubTokenAndContinue = async () => {
 		const secret = githubToken.trim();
 		if (secret === "" || githubTokenBusy) return;
@@ -1383,6 +1395,10 @@ function CloudProjectCard({
 			await client.putGitHubPAT({ secret });
 			await queryClient.invalidateQueries({ queryKey: ["cloud-user-providers"] });
 			setGithubToken("");
+			// Clear any warnings from the previous attempt so the user starts fresh.
+			setSubmitError(null);
+			setSubmitIsUnreachable(false);
+			setReadOnlyWarning(false);
 			setStep("repository");
 		} catch (err) {
 			if (err instanceof CloudCpAuthError) {
@@ -1396,13 +1412,34 @@ function CloudProjectCard({
 		}
 	};
 
-	const goToAgentStep = (event: FormEvent<HTMLFormElement>) => {
+	const goToValidationStep = async (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
 		setSubmitted(true);
 		if (org === undefined) return;
 		if (!isHttpsRepositoryUrl(repositoryUrl) || displayName.trim() === "" || defaultBranch.trim() === "") return;
 		setSubmitError(null);
-		setStep("agents");
+		setSubmitIsUnreachable(false);
+		setReadOnlyWarning(false);
+		setIsValidating(true);
+		try {
+			const result = await client.validateSavedRepositoryAccess({
+				repositoryUrl: repositoryUrl.trim(),
+			});
+			if (!result.writeAccess) {
+				setReadOnlyWarning(true);
+			} else {
+				setStep("agents");
+			}
+		} catch (err) {
+			if (err instanceof CloudCpError && err.code === "token_missing") {
+				setStep("github_token");
+			} else {
+				setSubmitError(err instanceof Error ? err.message : t("createProject.couldNotAdd"));
+				setSubmitIsUnreachable(err instanceof CloudCpError && err.code === "repository_unreachable");
+			}
+		} finally {
+			setIsValidating(false);
+		}
 	};
 
 	const createProject = async (selection: { workerAgent: string; orchestratorAgent: string }) => {
@@ -1420,63 +1457,23 @@ function CloudProjectCard({
 			await queryClient.invalidateQueries({ queryKey: cloudProjectsQueryKey });
 			onCreated();
 		} catch (err) {
-			if (err instanceof CloudCpError && err.code === "repository_unreachable") {
-				setStep("repository");
-				setRepositoryUnreachable(true);
-				setSubmitError(err.message);
-			} else {
-				setSubmitError(err instanceof Error ? err.message : t("createProject.couldNotAdd"));
-			}
+			setSubmitError(err instanceof Error ? err.message : t("createProject.couldNotAdd"));
 		} finally {
 			setIsCreating(false);
 		}
 	};
 
-	const saveGitHubTokenAndRetry = async () => {
-		const secret = githubToken.trim();
-		if (secret === "" || githubTokenBusy) return;
-		setGithubTokenBusy(true);
-		setGithubTokenError(null);
-		try {
-			await client.putGitHubPAT({ secret });
-			await queryClient.invalidateQueries({ queryKey: ["cloud-user-providers"] });
-			setGithubToken("");
-			setRepositoryUnreachable(false);
-			setSubmitError(null);
-			const selection = lastAgentSelectionRef.current;
-			if (selection) {
-				// The token was the only thing missing — finish the create the
-				// button promised, rather than sending the user back to reselect
-				// agents they already picked.
-				await createProject(selection);
-			} else {
-				setStep("agents");
-			}
-		} catch (err) {
-			if (err instanceof CloudCpAuthError) {
-				setGithubTokenError("Your AO Cloud session expired. Sign in again, then retry.");
-				onAuthRequired();
-			} else {
-				setGithubTokenError(err instanceof Error ? err.message : t("createProject.couldNotAdd"));
-			}
-		} finally {
-			setGithubTokenBusy(false);
-		}
-	};
-
 	const title = (
 		<span className="text-balance">
-			{step === "github"
-				? t("createProject.cloudSetupTitle", { defaultValue: "Cloud setup" })
-				: step === "github_token"
-					? t("createProject.githubAccessKeyTitle", { defaultValue: "GitHub access key" })
+			{step === "github_token"
+				? t("createProject.githubAccessKeyTitle", { defaultValue: "GitHub access key" })
 				: t("createProject.cloudTitle")}
 		</span>
 	);
 	return (
 		<div className={onboardingPanelClass}>
 			<div className={cn("relative flex items-start gap-3 px-4 pt-3", dialog && onClose && "pr-12")}>
-				<Button type="button" variant="outline" size="icon" aria-label={t("createProject.backToSource")} onClick={step === "github" ? onBack : step === "agents" ? () => setStep("repository") : () => setStep("github")} disabled={isCreating || githubTokenBusy}>
+				<Button type="button" variant="outline" size="icon" aria-label={t("createProject.backToSource")} onClick={step === "repository" ? onBack : step === "agents" ? () => setStep("repository") : () => setStep("repository")} disabled={isCreating || githubTokenBusy || isValidating}>
 					<ChevronLeft className="size-4" aria-hidden="true" />
 				</Button>
 				<div className="min-w-0 flex-1">
@@ -1502,42 +1499,7 @@ function CloudProjectCard({
 				</button>
 			) : null}
 			<div className={cn(onboardingPanelBodyClass, "pt-4")}>
-			{step === "github" ? (
-				<div className="overflow-hidden rounded-md border border-border/50 bg-[var(--color-bg-import-modal)]">
-					<div className="flex flex-col divide-y divide-border/50">
-						<button
-							type="button"
-							aria-label="Clone a repository"
-							className="group flex min-h-[76px] items-center gap-3 px-3.5 py-3 text-left hover:bg-accent/50 active:bg-accent"
-							onClick={continueWithPublicRepository}
-						>
-							<span className="grid w-9 shrink-0 place-items-center text-muted-foreground group-hover:text-foreground">
-								<GitHubIcon className="size-5" />
-							</span>
-							<span className="min-w-0">
-								<span className="block text-[14px] font-medium text-foreground">Clone a repository</span>
-								<span className="mt-0.5 block text-[12px] leading-5 text-muted-foreground">Start from a GitHub repository</span>
-							</span>
-							<ChevronRight className="ml-auto size-4 text-muted-foreground" aria-hidden="true" />
-						</button>
-						<button
-							type="button"
-							aria-label="Access your private repositories"
-							className="group flex min-h-[76px] items-center gap-3 px-3.5 py-3 text-left hover:bg-accent/50 active:bg-accent"
-							onClick={() => setStep("github_token")}
-						>
-							<span className="grid w-9 shrink-0 place-items-center text-muted-foreground group-hover:text-foreground">
-								<KeyRound className="size-5" aria-hidden="true" strokeWidth={1.8} />
-							</span>
-							<span className="min-w-0">
-								<span className="block text-[14px] font-medium text-foreground">Access your private repositories</span>
-								<span className="mt-0.5 block text-[12px] leading-5 text-muted-foreground">Connect with personal access token</span>
-							</span>
-							<ChevronRight className="ml-auto size-4 text-muted-foreground" aria-hidden="true" />
-						</button>
-					</div>
-				</div>
-			) : step === "github_token" ? (
+			{step === "github_token" ? (
 				<form
 					className="flex flex-col gap-4"
 					onSubmit={(event) => {
@@ -1580,7 +1542,7 @@ function CloudProjectCard({
 						onSubmit={() => void saveGitHubTokenAndContinue()}
 					/>
 					<div className={onboardingFooterActionsClass}>
-						<Button type="button" variant="outline" onClick={() => setStep("github")} disabled={githubTokenBusy}>
+						<Button type="button" variant="outline" onClick={() => setStep("repository")} disabled={githubTokenBusy}>
 							{t("createProject.back", { defaultValue: "Back" })}
 						</Button>
 						<Button type="submit" variant="primary" disabled={githubTokenBusy || githubToken.trim() === ""}>
@@ -1602,10 +1564,30 @@ function CloudProjectCard({
 					createError={submitError}
 				/>
 			) : (
-				<form className="flex flex-col gap-5" onSubmit={goToAgentStep}>
+		<form className="flex flex-col gap-5" onSubmit={goToValidationStep}>
 					{submitError ? (
 						<div className={onboardingAlertErrorClass} role="alert">
-							{submitError}
+							<p>{submitError}</p>
+							{submitIsUnreachable ? (
+								<div className="mt-2 flex">
+									<Button type="button" variant="outline" size="sm" onClick={() => setStep("github_token")}>
+										Update Token
+									</Button>
+								</div>
+							) : null}
+						</div>
+					) : null}
+					{readOnlyWarning ? (
+						<div className={cn(onboardingAlertErrorClass, "border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400")} role="alert">
+							<p className="mb-2">Your token currently has read-only access to this repository. If you need to push changes, update your token permissions.</p>
+							<div className="flex gap-2">
+								<Button type="button" variant="outline" size="sm" onClick={() => { setReadOnlyWarning(false); setStep("github_token"); }}>
+									Change Token
+								</Button>
+								<Button type="button" variant="secondary" size="sm" onClick={() => { setReadOnlyWarning(false); setStep("agents"); }}>
+									Continue anyway
+								</Button>
+							</div>
 						</div>
 					) : null}
 					<div className="space-y-2">
@@ -1624,13 +1606,12 @@ function CloudProjectCard({
 								aria-describedby={urlError ? "cloudRepositoryUrlError" : undefined}
 								aria-invalid={urlError ? true : undefined}
 								className="bg-[var(--color-bg-import-card)] pl-10 font-mono text-[13px]"
-								disabled={isCreating}
+								disabled={isCreating || isValidating}
 								placeholder={t("createProject.cloneRepositoryUrlPlaceholder")}
 								spellCheck={false}
 								value={repositoryUrl}
 								onChange={(event) => {
 									setRepositoryUrl(event.target.value);
-									setRepositoryUnreachable(false);
 								}}
 							/>
 						</div>
@@ -1640,28 +1621,6 @@ function CloudProjectCard({
 							</p>
 						) : null}
 					</div>
-					{repositoryUnreachable ? (
-						<GitHubTokenField
-							id="cloudGithubToken"
-							tone="warning"
-							label={t("createProject.githubTokenLabel", { defaultValue: "GitHub token" })}
-							hint={t("createProject.githubTokenHint", {
-								defaultValue: "Needs Contents: read and write on this repository.",
-							})}
-							value={githubToken}
-							disabled={githubTokenBusy}
-							error={githubTokenError}
-							submitVariant="outline"
-							submitLabel={
-								githubTokenBusy
-									? t("createProject.creating")
-									: t("createProject.saveAndRetry", { defaultValue: "Save and retry" })
-							}
-							submitDisabled={githubTokenBusy}
-							onChange={setGithubToken}
-							onSubmit={() => void saveGitHubTokenAndRetry()}
-						/>
-					) : null}
 					<div className="grid gap-5 sm:grid-cols-2">
 						<div className="space-y-2">
 							<Label htmlFor="cloudDisplayName" className={onboardingFormLabelClass}>
@@ -1677,7 +1636,7 @@ function CloudProjectCard({
 									aria-describedby={nameError ? "cloudDisplayNameError" : undefined}
 									aria-invalid={nameError ? true : undefined}
 									className="bg-[var(--color-bg-import-card)] pl-10 text-[13px]"
-									disabled={isCreating}
+									disabled={isCreating || isValidating}
 									placeholder="web-app"
 									spellCheck={false}
 									value={displayName}
@@ -1705,7 +1664,7 @@ function CloudProjectCard({
 									aria-describedby={branchError ? "cloudDefaultBranchError" : undefined}
 									aria-invalid={branchError ? true : undefined}
 									className="bg-[var(--color-bg-import-card)] pl-10 font-mono text-[13px]"
-									disabled={isCreating}
+									disabled={isCreating || isValidating}
 									placeholder="main"
 									spellCheck={false}
 									value={defaultBranch}
@@ -1729,8 +1688,8 @@ function CloudProjectCard({
 								{t("createProject.cloudWorkspaceConnecting")}
 							</p>
 						) : null}
-						<Button type="submit" variant="primary" disabled={isCreating || org === undefined}>
-							{t("createProject.next", { defaultValue: "Next" })}
+						<Button type="submit" variant="primary" disabled={isCreating || isValidating || org === undefined}>
+							{isValidating ? t("createProject.creating", { defaultValue: "Validating..." }) : t("createProject.next", { defaultValue: "Next" })}
 						</Button>
 					</div>
 				</form>

@@ -40,6 +40,8 @@ import type {
 	CloudCpTerminalTicketRequest,
 	CloudCpTerminalTicketResponse,
 	CloudCpUpdateProjectRequest,
+	CloudCpValidateRepositoryAccessRequest,
+	CloudCpValidateRepositoryAccessResponse,
 	CloudCpWakeSessionsResponse,
 } from "./types";
 
@@ -179,6 +181,10 @@ export interface CloudCpClient {
 	deleteAgentConnection(orgId: string, agent: CloudCpAgentProvider, options?: CloudCpRequestOptions): Promise<void>;
 	putGitHubPAT(body: CloudCpPutGitHubPATRequest, options?: CloudCpRequestOptions): Promise<CloudCpProviderConnectionResponse>;
 	deleteGitHubPAT(options?: CloudCpRequestOptions): Promise<void>;
+	validateSavedRepositoryAccess(
+		body: CloudCpValidateRepositoryAccessRequest,
+		options?: CloudCpRequestOptions,
+	): Promise<CloudCpValidateRepositoryAccessResponse>;
 }
 
 type QueryParams = Record<string, string | number | undefined>;
@@ -420,5 +426,7 @@ export function createCloudCpClient(options: CloudCpClientOptions): CloudCpClien
 			}),
 		putGitHubPAT: (body, o) => requestJson("PUT", "/me/github-pat", { body, signal: o?.signal }),
 		deleteGitHubPAT: (o) => requestVoid("DELETE", "/me/github-pat", { signal: o?.signal }),
+		validateSavedRepositoryAccess: (body, o) =>
+			requestJson("POST", "/me/github-pat/validate-saved-repository", { body, signal: o?.signal }),
 	};
 }
