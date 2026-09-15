@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -203,6 +204,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnprocessableEntity, "repository_unreachable", "Can't reach this repository — it may be private, or the URL may be wrong.")
 		return
 	}
+	owner, repo, _ := parseGitHubRepo(request.RepositoryURL)
+	canonicalURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+
 	project, err := s.store.CreateProject(
 		r.Context(),
 		principalFrom(r),
@@ -210,7 +214,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		key,
 		domain.CreateProject{
 			DisplayName:   request.DisplayName,
-			RepositoryURL: request.RepositoryURL,
+			RepositoryURL: canonicalURL,
 			DefaultBranch: request.DefaultBranch,
 			Config:        config,
 		},
@@ -684,55 +688,67 @@ func (s *Server) probeRepositoryReachable(ctx context.Context, repositoryURL str
 	return response.StatusCode == http.StatusOK
 }
 
-// probeRepositoryAccess asks the git smart-HTTP endpoint whether a repository
+// parseGitHubRepo validates and extracts the owner and repo from a GitHub URL.
+func parseGitHubRepo(repoURL string) (owner, repo string, ok bool) {
+	parsed, err := url.ParseRequestURI(repoURL)
+	if err != nil || parsed.Scheme != "https" {
+		return "", "", false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "github.com" && host != "www.github.com" {
+		return "", "", false
+	}
+
+	path := strings.Trim(parsed.Path, "/")
+	path = strings.TrimSuffix(path, ".git")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
+}
+
+// probeRepositoryAccess asks the GitHub API whether a repository
 // is reachable with the provided token, and checks for write vs read-only access.
 func (s *Server) probeRepositoryAccess(ctx context.Context, repositoryURL string, token string) (reachable bool, writeAccess bool) {
-	target := strings.TrimSuffix(repositoryURL, "/")
-	if !strings.HasSuffix(target, ".git") {
-		target += ".git"
+	owner, repo, ok := parseGitHubRepo(repositoryURL)
+	if !ok {
+		return false, false
 	}
+
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	// Check write access
-	reqWrite, err := http.NewRequestWithContext(
-		probeCtx, http.MethodGet, target+"/info/refs?service=git-receive-pack", http.NoBody,
-	)
+	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, apiURL, http.NoBody)
 	if err != nil {
 		return false, false
 	}
-	reqWrite.SetBasicAuth("git", token)
-	respWrite, err := s.repositoryProbeClient.Do(reqWrite)
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	resp, err := s.repositoryProbeClient.Do(req)
 	if err != nil {
 		return false, false
 	}
-	defer func() { _ = respWrite.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(respWrite.Body, 4<<10))
+	defer func() { _ = resp.Body.Close() }()
 
-	if respWrite.StatusCode == http.StatusOK {
-		return true, true
-	}
-
-	// Check read access
-	reqRead, err := http.NewRequestWithContext(
-		probeCtx, http.MethodGet, target+"/info/refs?service=git-upload-pack", http.NoBody,
-	)
-	if err != nil {
+	if resp.StatusCode != http.StatusOK {
 		return false, false
 	}
-	reqRead.SetBasicAuth("git", token)
-	respRead, err := s.repositoryProbeClient.Do(reqRead)
-	if err != nil {
-		return false, false
-	}
-	defer func() { _ = respRead.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(respRead.Body, 4<<10))
 
-	if respRead.StatusCode == http.StatusOK {
-		return true, false
+	var data struct {
+		Permissions struct {
+			Push bool `json:"push"`
+		} `json:"permissions"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return true, false // reachable, but failed to parse permissions
 	}
 
-	return false, false
+	return true, data.Permissions.Push
 }
 
 func validProjectInput(request createProjectRequest) bool {
@@ -740,8 +756,8 @@ func validProjectInput(request createProjectRequest) bool {
 		len(request.DefaultBranch) < 1 || len(request.DefaultBranch) > 255 {
 		return false
 	}
-	parsed, err := url.ParseRequestURI(request.RepositoryURL)
-	return err == nil && parsed.Scheme == "https" && parsed.Host != ""
+	_, _, ok := parseGitHubRepo(request.RepositoryURL)
+	return ok
 }
 
 func validProjectUpdate(request updateProjectRequest) bool {

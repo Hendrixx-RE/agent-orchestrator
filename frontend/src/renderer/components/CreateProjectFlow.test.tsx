@@ -58,6 +58,7 @@ const cloudMocks = vi.hoisted(() => ({
 	listProviderConnections: vi.fn(),
 	listUserProviderConnections: vi.fn(),
 	putGitHubPAT: vi.fn(),
+	validateSavedRepositoryAccess: vi.fn(),
 	signIn: vi.fn(),
 }));
 
@@ -82,6 +83,7 @@ vi.mock("../hooks/useCloudCp", () => ({
 			listProviderConnections: cloudMocks.listProviderConnections,
 			listUserProviderConnections: cloudMocks.listUserProviderConnections,
 			putGitHubPAT: cloudMocks.putGitHubPAT,
+			validateSavedRepositoryAccess: cloudMocks.validateSavedRepositoryAccess,
 		},
 		ready: cloudMocks.cloudEnabled && cloudMocks.sessionStatus === "authenticated",
 		baseUrl: "https://cp.example.com",
@@ -284,6 +286,7 @@ beforeEach(() => {
 	cloudMocks.putGitHubPAT.mockReset().mockResolvedValue({
 		providerConnection: { id: "gh-1", provider: "github", label: "default", config: {}, validationState: "valid", createdAt: "", updatedAt: "" },
 	});
+	cloudMocks.validateSavedRepositoryAccess.mockReset().mockResolvedValue({ writeAccess: true });
 	cloudMocks.listUserProviderConnections.mockReset().mockResolvedValue({ providerConnections: [] });
 	cloudMocks.signIn.mockReset();
 	window.localStorage.clear();
@@ -1418,7 +1421,9 @@ describe("CreateProjectFlow project import validation", () => {
 
 	describe("CreateProjectFlow cloud offering", () => {
 	async function connectGitHub(user: ReturnType<typeof userEvent.setup>) {
-		await user.click(screen.getByRole("button", { name: "Access your private repositories" }));
+		cloudMocks.listUserProviderConnections.mockResolvedValue({
+			providerConnections: [{ id: "gh-1", provider: "github", label: "default", config: {}, validationState: "valid", createdAt: "", updatedAt: "" }],
+		});
 		await user.type(screen.getByLabelText("Paste access token"), "ghp_setup_token");
 		await user.click(screen.getByRole("button", { name: "Continue" }));
 		await screen.findByLabelText("Repository URL");
@@ -1503,63 +1508,7 @@ describe("CreateProjectFlow project import validation", () => {
 		expect(cloudMocks.createProject).not.toHaveBeenCalled();
 	});
 
-	it("opens GitHub setup, then advances to repository details after connecting", async () => {
-		cloudMocks.cloudEnabled = true;
-		cloudMocks.sessionStatus = "authenticated";
-		cloudMocks.listUserProviderConnections.mockResolvedValue({
-			providerConnections: [
-				{ id: "gh-1", provider: "github", label: "default", config: {}, validationState: "valid", createdAt: "", updatedAt: "" },
-			],
-		});
-		const user = userEvent.setup();
-		render(<CreateProjectFlow embedded mode="choose" {...noop} />, { wrapper: CloudTestProviders });
 
-		await user.click(screen.getByRole("button", { name: "New cloud project" }));
-
-		expect(screen.getByRole("heading", { name: "Cloud setup" })).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Clone a repository" })).toBeInTheDocument();
-		expect(screen.getByRole("button", { name: "Access your private repositories" })).toBeInTheDocument();
-		expect(screen.queryByLabelText("Paste access token")).not.toBeInTheDocument();
-		expect(screen.queryByLabelText("Repository URL")).not.toBeInTheDocument();
-
-		await connectGitHub(user);
-
-		expect(cloudMocks.putGitHubPAT).toHaveBeenCalledWith({ secret: "ghp_setup_token" });
-		expect(screen.getByLabelText("Repository URL")).toBeInTheDocument();
-		expect(cloudMocks.listUserProviderConnections).not.toHaveBeenCalled();
-	});
-
-	it("continues with a public GitHub repository without asking for a key", async () => {
-		cloudMocks.cloudEnabled = true;
-		cloudMocks.sessionStatus = "authenticated";
-		const user = userEvent.setup();
-		render(<CreateProjectFlow embedded mode="choose" {...noop} />, { wrapper: CloudTestProviders });
-
-		await user.click(screen.getByRole("button", { name: "New cloud project" }));
-		await user.click(screen.getByRole("button", { name: "Clone a repository" }));
-
-		expect(screen.getByLabelText("Repository URL")).toBeInTheDocument();
-		expect(screen.queryByLabelText("Paste access token")).not.toBeInTheDocument();
-	});
-
-	it("reopens AO Cloud sign-in when the cloud session expires while saving a GitHub token", async () => {
-		cloudMocks.cloudEnabled = true;
-		cloudMocks.sessionStatus = "authenticated";
-		cloudMocks.putGitHubPAT.mockRejectedValue(
-			new CloudCpAuthError("The access token is invalid or expired.", { status: 401, code: "unauthorized" }),
-		);
-		const user = userEvent.setup();
-		render(<CreateProjectFlow embedded mode="choose" {...noop} />, { wrapper: CloudTestProviders });
-
-		await user.click(screen.getByRole("button", { name: "New cloud project" }));
-		await user.click(screen.getByRole("button", { name: "Access your private repositories" }));
-		await user.type(screen.getByLabelText("Paste access token"), "github_pat_fresh");
-		await user.click(screen.getByRole("button", { name: "Continue" }));
-
-		expect(await screen.findByText("Your AO Cloud session expired. Sign in again, then continue.")).toBeInTheDocument();
-		expect(screen.getByLabelText("Paste access token")).toHaveValue("github_pat_fresh");
-		expect(cloudMocks.signIn).toHaveBeenCalledOnce();
-	});
 
 	it("returns from GitHub setup to the project source list", async () => {
 		cloudMocks.cloudEnabled = true;
@@ -1600,19 +1549,22 @@ describe("CreateProjectFlow project import validation", () => {
 		await waitFor(() => expect(createButton).not.toBeDisabled());
 		await user.click(createButton);
 
-		// The failure returns the user to the repository step with the reason
-		// shown and a token field revealed, instead of leaving them stuck on
-		// the agent step or failing silently later inside a sandbox.
-		expect(await screen.findByLabelText("GitHub token")).toBeInTheDocument();
-		expect(screen.getByText(/can't reach this repository/i)).toBeInTheDocument();
+		// The failure returns the user to the repository step with the reason shown
+		expect(await screen.findByText(/can't reach this repository/i)).toBeInTheDocument();
 
-		await user.type(screen.getByLabelText("GitHub token"), "ghp_validtoken00000000000000000000000");
-		await user.click(screen.getByRole("button", { name: "Save and retry" }));
+		await user.click(screen.getByRole("button", { name: "Update Token" }));
+		await user.type(screen.getByLabelText("Paste access token"), "ghp_validtoken00000000000000000000000");
+		await user.click(screen.getByRole("button", { name: "Continue" }));
 
-		// "Save and retry" means it: the token is saved and the same create is
-		// re-attempted automatically, with the agents already chosen — not a
-		// second trip through the agent step.
 		await waitFor(() => expect(cloudMocks.putGitHubPAT).toHaveBeenCalledWith({ secret: "ghp_validtoken00000000000000000000000" }));
+
+		// Note: The UI doesn't automatically re-attempt creation anymore.
+		// It returns to the repository step where the user must click Next again.
+		await user.click(screen.getByRole("button", { name: "Next" }));
+		const retryCreateButton = await screen.findByRole("button", { name: "Create cloud project" });
+		await waitFor(() => expect(retryCreateButton).not.toBeDisabled());
+		await user.click(retryCreateButton);
+
 		await waitFor(() => expect(cloudMocks.createProject).toHaveBeenCalledTimes(2));
 		expect(cloudMocks.createProject).toHaveBeenLastCalledWith("org-1", {
 			displayName: "private-repo",

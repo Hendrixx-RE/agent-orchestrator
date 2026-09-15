@@ -76,7 +76,7 @@ function CloudCredentialsSectionInner({ titleHidden }: { titleHidden?: boolean }
 			setGitHubPAT("");
 			await queryClient.invalidateQueries({ queryKey: ["cloud-user-provider-connections"] });
 		} catch (error) {
-			setGitHubPATError(error instanceof Error ? error.message : "Could not save the GitHub token.");
+			setGitHubPATError(error instanceof Error ? error.message : t("settings.cloudAgents.github.errorSave"));
 		} finally {
 			setGitHubPATBusy(false);
 		}
@@ -88,7 +88,7 @@ function CloudCredentialsSectionInner({ titleHidden }: { titleHidden?: boolean }
 			await client.deleteGitHubPAT();
 			await queryClient.invalidateQueries({ queryKey: ["cloud-user-provider-connections"] });
 		} catch (error) {
-			setGitHubPATError(error instanceof Error ? error.message : "Could not remove the GitHub token.");
+			setGitHubPATError(error instanceof Error ? error.message : t("settings.cloudAgents.github.errorRemove"));
 		} finally {
 			setGitHubPATBusy(false);
 		}
@@ -115,19 +115,19 @@ function CloudCredentialsSectionInner({ titleHidden }: { titleHidden?: boolean }
 					</Button>
 				</div>
 				<div className="mt-3 border-t border-border px-3 pt-3">
-					<SettingsRow key="github-pat" icon={KeyRound} label="GitHub private repositories">
-						<span className="text-sm leading-5 text-settings-muted">{githubPATConnected ? "Connected" : "Not connected"}</span>
+					<SettingsRow key="github-pat" icon={KeyRound} label={t("settings.cloudAgents.github.title")}>
+						<span className="text-sm leading-5 text-settings-muted">{githubPATConnected ? t("settings.cloudAgents.github.connected") : t("settings.cloudAgents.github.notConnected")}</span>
 					</SettingsRow>
 					<GitHubTokenField
 						id="settings-github-pat"
 						bare
 						className="mt-2"
-						label="GitHub token"
-						hint="Optional. Paste a GitHub personal access token with access to private repositories. It is encrypted and used only by Cloud workers when cloning GitHub repositories."
+						label={t("settings.cloudAgents.github.tokenLabel")}
+						hint={t("settings.cloudAgents.github.tokenHint")}
 						value={githubPAT}
 						disabled={githubPATBusy}
 						error={githubPATError}
-						submitLabel={githubPATBusy ? "Saving…" : "Save token"}
+						submitLabel={githubPATBusy ? t("settings.cloudAgents.github.saving") : t("settings.cloudAgents.github.save")}
 						submitVariant="outline"
 						submitDisabled={githubPATBusy}
 						onChange={setGitHubPAT}
@@ -136,7 +136,7 @@ function CloudCredentialsSectionInner({ titleHidden }: { titleHidden?: boolean }
 					{githubPATConnected ? (
 						<div className="mt-2 flex justify-end">
 							<Button type="button" variant="footer" disabled={githubPATBusy} onClick={() => void removeGitHubPAT()}>
-								Remove
+								{t("settings.cloudAgents.github.remove")}
 							</Button>
 						</div>
 					) : null}

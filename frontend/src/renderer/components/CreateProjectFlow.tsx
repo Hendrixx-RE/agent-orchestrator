@@ -1458,6 +1458,10 @@ function CloudProjectCard({
 			onCreated();
 		} catch (err) {
 			setSubmitError(err instanceof Error ? err.message : t("createProject.couldNotAdd"));
+			if (err instanceof CloudCpError && err.code === "repository_unreachable") {
+				setStep("repository");
+				setSubmitIsUnreachable(true);
+			}
 		} finally {
 			setIsCreating(false);
 		}
@@ -1473,7 +1477,7 @@ function CloudProjectCard({
 	return (
 		<div className={onboardingPanelClass}>
 			<div className={cn("relative flex items-start gap-3 px-4 pt-3", dialog && onClose && "pr-12")}>
-				<Button type="button" variant="outline" size="icon" aria-label={t("createProject.backToSource")} onClick={step === "repository" ? onBack : step === "agents" ? () => setStep("repository") : () => setStep("repository")} disabled={isCreating || githubTokenBusy || isValidating}>
+				<Button type="button" variant="outline" size="icon" aria-label={t("createProject.backToSource")} onClick={step === "repository" || step === "github_token" ? onBack : () => setStep("repository")} disabled={isCreating || githubTokenBusy || isValidating}>
 					<ChevronLeft className="size-4" aria-hidden="true" />
 				</Button>
 				<div className="min-w-0 flex-1">
@@ -1510,15 +1514,15 @@ function CloudProjectCard({
 					<ol className="space-y-3 text-[13px] leading-5 text-foreground">
 						<li className="flex gap-3">
 							<span className="font-mono text-muted-foreground">1</span>
-							<span>Open GitHub token settings.</span>
+							<span>{t("createProject.githubToken.step1")}</span>
 						</li>
 						<li className="flex gap-3">
 							<span className="font-mono text-muted-foreground">2</span>
-							<span>Create a fine-grained token and choose the repositories AO can use.</span>
+							<span>{t("createProject.githubToken.step2")}</span>
 						</li>
 						<li className="flex gap-3">
 							<span className="font-mono text-muted-foreground">3</span>
-							<span>Set repository Contents permission to Read and write.</span>
+							<span>{t("createProject.githubToken.step3")}</span>
 						</li>
 					</ol>
 					<Button
@@ -1527,7 +1531,7 @@ function CloudProjectCard({
 						className="self-start"
 						onClick={() => void aoBridge.app.openExternal(GITHUB_TOKEN_SETTINGS_URL)}
 					>
-						Open GitHub token settings ↗
+						{t("createProject.githubToken.openSettings")}
 					</Button>
 					<GitHubTokenField
 						id="cloudGithubTokenSetup"
@@ -1571,7 +1575,7 @@ function CloudProjectCard({
 							{submitIsUnreachable ? (
 								<div className="mt-2 flex">
 									<Button type="button" variant="outline" size="sm" onClick={() => setStep("github_token")}>
-										Update Token
+										{t("createProject.githubToken.updateToken")}
 									</Button>
 								</div>
 							) : null}
@@ -1579,13 +1583,13 @@ function CloudProjectCard({
 					) : null}
 					{readOnlyWarning ? (
 						<div className={cn(onboardingAlertErrorClass, "border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400")} role="alert">
-							<p className="mb-2">Your token currently has read-only access to this repository. If you need to push changes, update your token permissions.</p>
+							<p className="mb-2">{t("createProject.githubToken.readOnlyWarning")}</p>
 							<div className="flex gap-2">
 								<Button type="button" variant="outline" size="sm" onClick={() => { setReadOnlyWarning(false); setStep("github_token"); }}>
-									Change Token
+									{t("createProject.githubToken.changeToken")}
 								</Button>
 								<Button type="button" variant="secondary" size="sm" onClick={() => { setReadOnlyWarning(false); setStep("agents"); }}>
-									Continue anyway
+									{t("createProject.githubToken.continueAnyway")}
 								</Button>
 							</div>
 						</div>
