@@ -37,6 +37,10 @@ func (s *githubPATFakeStore) DeleteUserProviderConnection(context.Context, domai
 	return nil
 }
 
+func (s *githubPATFakeStore) UserProviderConnectionSecret(context.Context, domain.Principal, string, string) ([]byte, []byte, error) {
+	return nil, nil, nil
+}
+
 // newGitHubPATTestServer wires a Server whose credential validator points at
 // a fake GitHub that answers /user with the given status, so the test
 // controls whether the token "works" without a real network call.

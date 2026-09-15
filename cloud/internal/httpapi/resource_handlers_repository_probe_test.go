@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/cloud/internal/domain"
+	"github.com/aoagents/agent-orchestrator/cloud/internal/secrets"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -22,6 +23,8 @@ import (
 type repositoryProbeFakeStore struct {
 	Store
 	created int
+	encrypted []byte
+	nonce []byte
 }
 
 func (s *repositoryProbeFakeStore) CreateProject(
@@ -31,14 +34,30 @@ func (s *repositoryProbeFakeStore) CreateProject(
 	return domain.Project{ID: "proj-1", DisplayName: "widgets"}, nil
 }
 
+func (s *repositoryProbeFakeStore) ListUserProviderConnections(context.Context, domain.Principal) ([]domain.UserProviderConnection, error) {
+	return nil, nil
+}
+func (s *repositoryProbeFakeStore) UpsertUserProviderConnection(context.Context, domain.Principal, string, string, []byte, []byte, json.RawMessage) (domain.UserProviderConnection, error) {
+	return domain.UserProviderConnection{}, nil
+}
+func (s *repositoryProbeFakeStore) DeleteUserProviderConnection(context.Context, domain.Principal, string, string) error {
+	return nil
+}
+func (s *repositoryProbeFakeStore) UserProviderConnectionSecret(context.Context, domain.Principal, string, string) ([]byte, []byte, error) {
+	return s.encrypted, s.nonce, nil
+}
+
 const repositoryProbeOrgID = "00000000-0000-0000-0000-0000000000aa"
 
 func newRepositoryProbeTestServer(t *testing.T, probeClient *http.Client) (*Server, *repositoryProbeFakeStore) {
 	t.Helper()
-	store := &repositoryProbeFakeStore{}
+	cipher, _ := secrets.New(make([]byte, 32))
+	encrypted, nonce, _ := cipher.Encrypt([]byte("fake-token"), "user:00000000-0000-0000-0000-000000000001|github|default")
+	store := &repositoryProbeFakeStore{encrypted: encrypted, nonce: nonce}
 	srv := New(Options{
 		Store:                 store,
 		RepositoryProbeClient: probeClient,
+		SecretCipher:          cipher,
 		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	return srv, store
