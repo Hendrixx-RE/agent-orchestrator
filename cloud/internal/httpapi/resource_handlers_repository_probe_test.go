@@ -22,9 +22,9 @@ import (
 // row or provision a sandbox for it.
 type repositoryProbeFakeStore struct {
 	Store
-	created int
+	created   int
 	encrypted []byte
-	nonce []byte
+	nonce     []byte
 }
 
 func (s *repositoryProbeFakeStore) CreateProject(
