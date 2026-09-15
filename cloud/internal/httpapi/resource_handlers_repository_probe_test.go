@@ -160,7 +160,7 @@ func TestProbeRepositoryReachableFailsOpenOnConnectionError(t *testing.T) {
 	}
 	srv, _ := newRepositoryProbeTestServer(t, mockErr)
 
-	// In the original, a connection error returned true (fail open). 
+	// In the original, a connection error returned true (fail open).
 	// Wait, the new code for probeRepositoryAccess returns false, false if err != nil or StatusCode != 200.
 	// Oh, the original test was for probeRepositoryReachable which failed open.
 	// Let's test probeRepositoryAccess.
