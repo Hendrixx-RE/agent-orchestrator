@@ -42,7 +42,14 @@ const (
 	bootstrapFailed     = "__AO_BOOTSTRAP_FAILED__"
 	bootstrapUploadACK  = "__AO_UPLOAD_ACK__"
 	bootstrapUploadDone = "__AO_UPLOAD_DONE__"
-	bootstrapResultWait = 2 * time.Minute
+	// Coder rejects deadline extension requests less than 30 minutes in the
+	// future. Keep the provider contract here rather than leaking it into the
+	// provider-neutral reconciler.
+	coderMinimumDeadlineLeadTime = 30 * time.Minute
+	// Leave enough room for clock skew and request transit after AO computes the
+	// deadline but before Coder validates it.
+	coderDeadlineRequestMargin = time.Minute
+	bootstrapResultWait        = 2 * time.Minute
 )
 
 var userPattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
@@ -71,8 +78,9 @@ type Client struct {
 }
 
 var (
-	_ sandbox.Provider     = (*Client)(nil)
-	_ sandbox.Bootstrapper = (*Client)(nil)
+	_ sandbox.Provider         = (*Client)(nil)
+	_ sandbox.Bootstrapper     = (*Client)(nil)
+	_ sandbox.DeadlineExtender = (*Client)(nil)
 )
 
 // New creates a fail-closed Coder provider client.
@@ -165,6 +173,8 @@ type workspaceHealth struct {
 
 type workspaceBuild struct {
 	Status    string              `json:"status"`
+	Reason    string              `json:"reason"`
+	Deadline  *time.Time          `json:"deadline"`
 	Resources []workspaceResource `json:"resources"`
 }
 
@@ -314,6 +324,21 @@ func (c *Client) Resume(ctx context.Context, id sandbox.ID) error {
 	return c.Start(ctx, id)
 }
 
+// ExtendDeadline keeps a Coder workspace alive while AO has durable active
+// work or recent user interaction. Coder applies template maximum-runtime
+// policy to this request.
+func (c *Client) ExtendDeadline(ctx context.Context, id sandbox.ID, deadline time.Time) error {
+	minimumDeadline := time.Now().UTC().Add(coderMinimumDeadlineLeadTime + coderDeadlineRequestMargin)
+	if deadline.Before(minimumDeadline) {
+		deadline = minimumDeadline
+	}
+	return c.do(ctx, http.MethodPut,
+		"/api/v2/workspaces/"+url.PathEscape(string(id))+"/extend",
+		struct {
+			Deadline time.Time `json:"deadline"`
+		}{Deadline: deadline.UTC()}, nil)
+}
+
 func (c *Client) Delete(ctx context.Context, id sandbox.ID) error {
 	err := c.transition(ctx, id, "delete")
 	if errors.Is(err, sandbox.ErrNotFound) {
@@ -335,10 +360,17 @@ func (c *Client) toEnvironment(view workspace) sandbox.Environment {
 			!agent.Health.Healthy || !view.Health.Healthy) {
 		state = sandbox.StateProvisioning
 	}
-	return sandbox.Environment{
+	environment := sandbox.Environment{
 		ID: sandbox.ID(view.ID), Name: view.Name, State: state, Target: agent.ID,
-		Resource: domain.ResourceProfile{},
+		Resource: domain.ResourceProfile{}, Deadline: view.LatestBuild.Deadline,
 	}
+	if state == sandbox.StateStopped {
+		switch strings.ToLower(strings.TrimSpace(view.LatestBuild.Reason)) {
+		case "autostop", "dormancy":
+			environment.StopCause = sandbox.StopCauseExternalIdle
+		}
+	}
+	return environment
 }
 
 func normalizeState(status string) string {
