@@ -275,7 +275,7 @@ const SummaryView = memo(function SummaryView({
 	session: WorkspaceSession;
 }) {
 	const { t } = useTranslation();
-	const query = useSessionScmSummary(session.id);
+	const query = useSessionScmSummary(session);
 	const developerMode = useUiStore((state) => state.developerMode);
 	const usageQuery = useSessionUsage(session.id, developerMode);
 	const showUsage =
@@ -307,6 +307,7 @@ const SummaryView = memo(function SummaryView({
 						prSummaries.map((pr) => (
 							<PRSummaryCard
 								canOpenReviews={canOpenReviews}
+								isCloud={session.cloud !== undefined}
 								key={pr.url || pr.htmlUrl || pr.number}
 								onOpenReviews={onOpenReviews}
 								pr={pr}
@@ -1184,11 +1185,14 @@ function updateSessionMergePolicy(
 
 function PRSummaryCard({
 	canOpenReviews,
+	isCloud,
 	onOpenReviews,
 	pr,
 	sessionId,
 }: {
 	canOpenReviews: boolean;
+	/** Cloud PRs have no merge route on the local daemon; open them on GitHub instead. */
+	isCloud: boolean;
 	onOpenReviews: () => void;
 	pr: SessionPRSummary;
 	sessionId: string;
@@ -1197,6 +1201,7 @@ function PRSummaryCard({
 	const queryClient = useQueryClient();
 	const presentation = prCardPresentation(pr);
 	const canMerge =
+		!isCloud &&
 		pr.state === "open" &&
 		pr.ci.state === "passing" &&
 		pr.review.decision === "approved" &&
@@ -1619,7 +1624,7 @@ function ReviewsSection({
 	});
 	const reviewStates = reviewsQuery.data?.reviews ?? [];
 	const autoReviewEnabled = session.autoReviewEnabled === true;
-	const scmSummary = useSessionScmSummary(session.id);
+	const scmSummary = useSessionScmSummary(session);
 	const prSummaries = sessionPRDisplaySummaries(session, scmSummary.data);
 	const githubReviews = prSummaries.filter(
 		(pr) =>
