@@ -1355,7 +1355,9 @@ function CloudProjectCard({
 	const [isCreating, setIsCreating] = useState(false);
 	const [submitError, setSubmitError] = useState<string | null>(null);
 	const [submitIsUnreachable, setSubmitIsUnreachable] = useState(false);
+	const [submitIsUnavailable, setSubmitIsUnavailable] = useState(false);
 	const [readOnlyWarning, setReadOnlyWarning] = useState(false);
+
 	const userProviders = useQuery({
 		queryKey: ["cloud-user-providers"],
 		enabled: client !== undefined,
@@ -1394,11 +1396,13 @@ function CloudProjectCard({
 		try {
 			await client.putGitHubPAT({ secret });
 			await queryClient.invalidateQueries({ queryKey: ["cloud-user-providers"] });
+			await queryClient.invalidateQueries({ queryKey: ["cloud-user-provider-connections"] });
+			await queryClient.invalidateQueries({ queryKey: ["cloud-provider-connections"] });
 			setGithubToken("");
 			// Clear any warnings from the previous attempt so the user starts fresh.
 			setSubmitError(null);
 			setSubmitIsUnreachable(false);
-			setReadOnlyWarning(false);
+			setSubmitIsUnavailable(false);
 			setStep("repository");
 		} catch (err) {
 			if (err instanceof CloudCpAuthError) {
@@ -1412,13 +1416,13 @@ function CloudProjectCard({
 		}
 	};
 
-	const goToValidationStep = async (event: FormEvent<HTMLFormElement>) => {
-		event.preventDefault();
+	const validateAndProceed = async () => {
 		setSubmitted(true);
 		if (org === undefined) return;
 		if (!isHttpsRepositoryUrl(repositoryUrl) || displayName.trim() === "" || defaultBranch.trim() === "") return;
 		setSubmitError(null);
 		setSubmitIsUnreachable(false);
+		setSubmitIsUnavailable(false);
 		setReadOnlyWarning(false);
 		setIsValidating(true);
 		try {
@@ -1426,6 +1430,7 @@ function CloudProjectCard({
 				repositoryUrl: repositoryUrl.trim(),
 			});
 			if (!result.writeAccess) {
+				setSubmitError(t("createProject.githubToken.readOnlyToken", { defaultValue: "Your token does not have push access to this repository. Please provide a token with push permissions." }));
 				setReadOnlyWarning(true);
 			} else {
 				setStep("agents");
@@ -1435,11 +1440,17 @@ function CloudProjectCard({
 				setStep("github_token");
 			} else {
 				setSubmitError(err instanceof Error ? err.message : t("createProject.couldNotAdd"));
-				setSubmitIsUnreachable(err instanceof CloudCpError && err.code === "repository_unreachable");
+				setSubmitIsUnreachable(err instanceof CloudCpError && (err.code === "repository_unreachable" || err.code === "read_only_token"));
+				setSubmitIsUnavailable(err instanceof CloudCpError && err.code === "provider_unavailable");
 			}
 		} finally {
 			setIsValidating(false);
 		}
+	};
+
+	const goToValidationStep = async (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		await validateAndProceed();
 	};
 
 	const createProject = async (selection: { workerAgent: string; orchestratorAgent: string }) => {
@@ -1458,9 +1469,12 @@ function CloudProjectCard({
 			onCreated();
 		} catch (err) {
 			setSubmitError(err instanceof Error ? err.message : t("createProject.couldNotAdd"));
-			if (err instanceof CloudCpError && err.code === "repository_unreachable") {
+			if (err instanceof CloudCpError && (err.code === "repository_unreachable" || err.code === "read_only_token")) {
 				setStep("repository");
 				setSubmitIsUnreachable(true);
+			} else if (err instanceof CloudCpError && err.code === "provider_unavailable") {
+				setStep("repository");
+				setSubmitIsUnavailable(true);
 			}
 		} finally {
 			setIsCreating(false);
@@ -1514,15 +1528,15 @@ function CloudProjectCard({
 					<ol className="space-y-3 text-[13px] leading-5 text-foreground">
 						<li className="flex gap-3">
 							<span className="font-mono text-muted-foreground">1</span>
-							<span>{t("createProject.githubToken.step1")}</span>
+							<span>{t("createProject.githubToken.step1", { defaultValue: "Open GitHub token settings." })}</span>
 						</li>
 						<li className="flex gap-3">
 							<span className="font-mono text-muted-foreground">2</span>
-							<span>{t("createProject.githubToken.step2")}</span>
+							<span>{t("createProject.githubToken.step2", { defaultValue: "Create a fine-grained token and choose the repositories AO can use." })}</span>
 						</li>
 						<li className="flex gap-3">
 							<span className="font-mono text-muted-foreground">3</span>
-							<span>{t("createProject.githubToken.step3")}</span>
+							<span>{t("createProject.githubToken.step3", { defaultValue: "Set repository Contents permission to Read and write." })}</span>
 						</li>
 					</ol>
 					<Button
@@ -1531,7 +1545,7 @@ function CloudProjectCard({
 						className="self-start"
 						onClick={() => void aoBridge.app.openExternal(GITHUB_TOKEN_SETTINGS_URL)}
 					>
-						{t("createProject.githubToken.openSettings")}
+						{t("createProject.githubToken.openSettings", { defaultValue: "Open GitHub token settings" })}
 					</Button>
 					<GitHubTokenField
 						id="cloudGithubTokenSetup"
@@ -1575,23 +1589,25 @@ function CloudProjectCard({
 							{submitIsUnreachable ? (
 								<div className="mt-2 flex">
 									<Button type="button" variant="outline" size="sm" onClick={() => setStep("github_token")}>
-										{t("createProject.githubToken.updateToken")}
+										{t("createProject.githubToken.updateToken", { defaultValue: "Update Token" })}
+									</Button>
+								</div>
+							) : readOnlyWarning ? (
+								<div className="mt-2 flex gap-2">
+									<Button type="button" variant="outline" size="sm" onClick={() => setStep("github_token")}>
+										{t("createProject.githubToken.updateToken", { defaultValue: "Update Token" })}
+									</Button>
+									<Button type="button" variant="secondary" size="sm" onClick={() => { setReadOnlyWarning(false); setStep("agents"); }}>
+										{t("createProject.continueAnyway", { defaultValue: "Continue anyway" })}
+									</Button>
+								</div>
+							) : submitIsUnavailable ? (
+								<div className="mt-2 flex">
+									<Button type="button" variant="outline" size="sm" onClick={() => void validateAndProceed()}>
+										{t("createProject.githubToken.retry", { defaultValue: "Retry" })}
 									</Button>
 								</div>
 							) : null}
-						</div>
-					) : null}
-					{readOnlyWarning ? (
-						<div className={cn(onboardingAlertErrorClass, "border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400")} role="alert">
-							<p className="mb-2">{t("createProject.githubToken.readOnlyWarning")}</p>
-							<div className="flex gap-2">
-								<Button type="button" variant="outline" size="sm" onClick={() => { setReadOnlyWarning(false); setStep("github_token"); }}>
-									{t("createProject.githubToken.changeToken")}
-								</Button>
-								<Button type="button" variant="secondary" size="sm" onClick={() => { setReadOnlyWarning(false); setStep("agents"); }}>
-									{t("createProject.githubToken.continueAnyway")}
-								</Button>
-							</div>
 						</div>
 					) : null}
 					<div className="space-y-2">

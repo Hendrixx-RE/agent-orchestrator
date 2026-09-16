@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -191,6 +191,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnprocessableEntity, "token_missing", "No GitHub personal access token found. Please add one first.")
 		return
 	}
+	if len(encrypted) == 0 {
+		s.logger.Error("fetch GitHub personal access token: token is empty", "request_id", requestID(r))
+		writeError(w, r, http.StatusUnprocessableEntity, "token_missing", "No GitHub personal access token found. Please add one first.")
+		return
+	}
 	secret, err := s.secretCipher.Decrypt(encrypted, nonce, providerSecretAssociatedData("user:"+principal.UserID, githubPATProvider))
 	if err != nil {
 		s.logger.Error("decrypt GitHub personal access token", "error", err, "request_id", requestID(r))
@@ -199,13 +204,18 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	defer clear(secret)
 
-	reachable, _ := s.probeRepositoryAccess(r.Context(), request.RepositoryURL, string(secret))
+	reachable, _, err := s.probeRepositoryAccess(r.Context(), request.RepositoryURL, string(secret))
+	if err != nil {
+		s.logger.Error("probe repository access", "error", err, "request_id", requestID(r))
+		writeError(w, r, http.StatusBadGateway, "provider_unavailable", "GitHub is temporarily unavailable. Please try again later.")
+		return
+	}
 	if !reachable {
 		writeError(w, r, http.StatusUnprocessableEntity, "repository_unreachable", "Can't reach this repository — it may be private, or the URL may be wrong.")
 		return
 	}
 	owner, repo, _ := parseGitHubRepo(request.RepositoryURL)
-	canonicalURL := fmt.Sprintf("https://github.com/%s/%s.git", owner, repo)
+	canonicalURL := fmt.Sprintf("https://github.com/%s/%s", owner, repo)
 
 	project, err := s.store.CreateProject(
 		r.Context(),
@@ -654,39 +664,7 @@ func (s *Server) deleteSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// probeRepositoryReachable asks the git smart-HTTP endpoint whether a
-// repository is there and readable, the same way `git ls-remote` does for an
-// HTTPS remote — no git binary needed, one unauthenticated GET. A public
-// repository answers 200; a private or nonexistent one answers 401/404,
-// which git (and GitHub) both report identically so as not to leak whether a
-// private repository exists. The caller renders both as one message asking
-// for a token, matching that ambiguity rather than pretending to resolve it.
-//
-// A request that cannot even be attempted (bad URL past validProjectInput's
-// own check, DNS/connection failure) fails open: creation is not blocked by
-// an infrastructure hiccup that has nothing to do with whether the repo
-// itself exists.
-func (s *Server) probeRepositoryReachable(ctx context.Context, repositoryURL string) bool {
-	target := strings.TrimSuffix(repositoryURL, "/")
-	if !strings.HasSuffix(target, ".git") {
-		target += ".git"
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(
-		probeCtx, http.MethodGet, target+"/info/refs?service=git-upload-pack", http.NoBody,
-	)
-	if err != nil {
-		return true
-	}
-	response, err := s.repositoryProbeClient.Do(req)
-	if err != nil {
-		return true
-	}
-	defer func() { _ = response.Body.Close() }()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
-	return response.StatusCode == http.StatusOK
-}
+var githubPathRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
 // parseGitHubRepo validates and extracts the owner and repo from a GitHub URL.
 func parseGitHubRepo(repoURL string) (owner, repo string, ok bool) {
@@ -705,15 +683,18 @@ func parseGitHubRepo(repoURL string) (owner, repo string, ok bool) {
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", "", false
 	}
+	if !githubPathRegex.MatchString(parts[0]) || !githubPathRegex.MatchString(parts[1]) || parts[0] == "." || parts[0] == ".." || parts[1] == "." || parts[1] == ".." {
+		return "", "", false
+	}
 	return parts[0], parts[1], true
 }
 
 // probeRepositoryAccess asks the GitHub API whether a repository
 // is reachable with the provided token, and checks for write vs read-only access.
-func (s *Server) probeRepositoryAccess(ctx context.Context, repositoryURL string, token string) (reachable bool, writeAccess bool) {
+func (s *Server) probeRepositoryAccess(ctx context.Context, repositoryURL string, token string) (reachable bool, writeAccess bool, err error) {
 	owner, repo, ok := parseGitHubRepo(repositoryURL)
 	if !ok {
-		return false, false
+		return false, false, nil
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -722,7 +703,7 @@ func (s *Server) probeRepositoryAccess(ctx context.Context, repositoryURL string
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
 	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, apiURL, http.NoBody)
 	if err != nil {
-		return false, false
+		return false, false, err
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -731,12 +712,15 @@ func (s *Server) probeRepositoryAccess(ctx context.Context, repositoryURL string
 
 	resp, err := s.repositoryProbeClient.Do(req)
 	if err != nil {
-		return false, false
+		return false, false, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusNotFound {
+		return false, false, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return false, false
+		return false, false, fmt.Errorf("github api returned status %d", resp.StatusCode)
 	}
 
 	var data struct {
@@ -745,10 +729,10 @@ func (s *Server) probeRepositoryAccess(ctx context.Context, repositoryURL string
 		} `json:"permissions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return true, false // reachable, but failed to parse permissions
+		return false, false, err
 	}
 
-	return true, data.Permissions.Push
+	return true, data.Permissions.Push, nil
 }
 
 func validProjectInput(request createProjectRequest) bool {

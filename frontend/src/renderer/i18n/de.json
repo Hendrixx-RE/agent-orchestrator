@@ -1881,5 +1881,15 @@
 	"settings.models.customAgentModelAria": "Benutzerdefiniertes Modell für {{label}}",
 	"session.interfaceSwitchFailed": "Oberfläche konnte nicht gewechselt werden",
 	"session.dismissInterfaceSwitchError": "Fehler beim Oberflächenwechsel schließen",
-	"session.dismissInterfaceSwitchNotice": "Schließen"
+	"session.dismissInterfaceSwitchNotice": "Schließen",
+	"settings.cloudAgents.github.title": "GitHub private repositories",
+	"settings.cloudAgents.github.connected": "Connected",
+	"settings.cloudAgents.github.notConnected": "Not connected",
+	"settings.cloudAgents.github.tokenLabel": "GitHub token",
+	"settings.cloudAgents.github.tokenHint": "Optional. Paste a GitHub personal access token with access to private repositories. It is encrypted and used only by Cloud workers when cloning GitHub repositories.",
+	"settings.cloudAgents.github.save": "Save token",
+	"settings.cloudAgents.github.saving": "Saving…",
+	"settings.cloudAgents.github.remove": "Remove",
+	"settings.cloudAgents.github.errorSave": "Could not save the GitHub token.",
+	"settings.cloudAgents.github.errorRemove": "Could not remove the GitHub token."
 }

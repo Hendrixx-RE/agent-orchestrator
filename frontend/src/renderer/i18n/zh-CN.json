@@ -1863,5 +1863,15 @@
 	"settings.models.customAgentModelAria": "{{label}} 自定义模型",
 	"session.interfaceSwitchFailed": "无法切换界面",
 	"session.dismissInterfaceSwitchError": "关闭界面切换错误提示",
-	"session.dismissInterfaceSwitchNotice": "关闭"
+	"session.dismissInterfaceSwitchNotice": "关闭",
+	"settings.cloudAgents.github.title": "GitHub private repositories",
+	"settings.cloudAgents.github.connected": "Connected",
+	"settings.cloudAgents.github.notConnected": "Not connected",
+	"settings.cloudAgents.github.tokenLabel": "GitHub token",
+	"settings.cloudAgents.github.tokenHint": "Optional. Paste a GitHub personal access token with access to private repositories. It is encrypted and used only by Cloud workers when cloning GitHub repositories.",
+	"settings.cloudAgents.github.save": "Save token",
+	"settings.cloudAgents.github.saving": "Saving…",
+	"settings.cloudAgents.github.remove": "Remove",
+	"settings.cloudAgents.github.errorSave": "Could not save the GitHub token.",
+	"settings.cloudAgents.github.errorRemove": "Could not remove the GitHub token."
 }

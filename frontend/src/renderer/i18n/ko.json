@@ -1881,5 +1881,15 @@
 	"settings.models.customAgentModelAria": "{{label}} 사용자 지정 모델",
 	"session.interfaceSwitchFailed": "인터페이스를 전환할 수 없습니다",
 	"session.dismissInterfaceSwitchError": "인터페이스 전환 오류 닫기",
-	"session.dismissInterfaceSwitchNotice": "닫기"
+	"session.dismissInterfaceSwitchNotice": "닫기",
+	"settings.cloudAgents.github.title": "GitHub private repositories",
+	"settings.cloudAgents.github.connected": "Connected",
+	"settings.cloudAgents.github.notConnected": "Not connected",
+	"settings.cloudAgents.github.tokenLabel": "GitHub token",
+	"settings.cloudAgents.github.tokenHint": "Optional. Paste a GitHub personal access token with access to private repositories. It is encrypted and used only by Cloud workers when cloning GitHub repositories.",
+	"settings.cloudAgents.github.save": "Save token",
+	"settings.cloudAgents.github.saving": "Saving…",
+	"settings.cloudAgents.github.remove": "Remove",
+	"settings.cloudAgents.github.errorSave": "Could not save the GitHub token.",
+	"settings.cloudAgents.github.errorRemove": "Could not remove the GitHub token."
 }

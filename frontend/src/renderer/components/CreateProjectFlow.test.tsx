@@ -1573,4 +1573,43 @@ describe("CreateProjectFlow project import validation", () => {
 			config: { workerAgent: "claude-code", orchestratorAgent: "claude-code" },
 		});
 	});
+
+	it("blocks project creation if the token is read-only", async () => {
+		cloudMocks.cloudEnabled = true;
+		cloudMocks.sessionStatus = "authenticated";
+		cloudMocks.validateSavedRepositoryAccess.mockResolvedValue({ writeAccess: false });
+		const user = userEvent.setup();
+		render(<CreateProjectFlow embedded mode="choose" {...noop} />, { wrapper: CloudTestProviders });
+
+		await user.click(screen.getByRole("button", { name: "New cloud project" }));
+		await connectGitHub(user);
+		await user.type(screen.getByLabelText("Repository URL"), "https://github.com/acme/read-only-repo");
+		await user.type(screen.getByLabelText("Project name"), "read-only-repo");
+		await user.click(screen.getByRole("button", { name: "Next" }));
+
+		expect(await screen.findByText(/does not have push access/i)).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Update Token" })).toBeInTheDocument();
+	});
+
+	it("shows a retry button when GitHub is temporarily unavailable", async () => {
+		cloudMocks.cloudEnabled = true;
+		cloudMocks.sessionStatus = "authenticated";
+		cloudMocks.validateSavedRepositoryAccess.mockRejectedValue(
+			new CloudCpError("GitHub is temporarily unavailable.", {
+				status: 502,
+				code: "provider_unavailable",
+			})
+		);
+		const user = userEvent.setup();
+		render(<CreateProjectFlow embedded mode="choose" {...noop} />, { wrapper: CloudTestProviders });
+
+		await user.click(screen.getByRole("button", { name: "New cloud project" }));
+		await connectGitHub(user);
+		await user.type(screen.getByLabelText("Repository URL"), "https://github.com/acme/unavailable-repo");
+		await user.type(screen.getByLabelText("Project name"), "unavailable-repo");
+		await user.click(screen.getByRole("button", { name: "Next" }));
+
+		expect(await screen.findByText(/GitHub is temporarily unavailable/i)).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+	});
 });

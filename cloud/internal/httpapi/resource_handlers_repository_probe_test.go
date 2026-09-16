@@ -149,22 +149,21 @@ func TestCreateProjectRejectsNonGitHubURLs(t *testing.T) {
 	}
 }
 
-func TestProbeRepositoryReachableFailsOpenOnConnectionError(t *testing.T) {
+func TestProbeRepositoryAccessFailsClosedOnConnectionError(t *testing.T) {
 	mockErr := &mockRoundTripper{
 		handler: func(req *http.Request) *http.Response {
 			return &http.Response{
-				StatusCode: http.StatusBadGateway, // Or any failure
+				StatusCode: http.StatusBadGateway,
 				Body:       io.NopCloser(bytes.NewBufferString(`error`)),
 			}
 		},
 	}
 	srv, _ := newRepositoryProbeTestServer(t, mockErr)
 
-	// In the original, a connection error returned true (fail open).
-	// Wait, the new code for probeRepositoryAccess returns false, false if err != nil or StatusCode != 200.
-	// Oh, the original test was for probeRepositoryReachable which failed open.
-	// Let's test probeRepositoryAccess.
-	reachable, _ := srv.probeRepositoryAccess(context.Background(), "https://github.com/octo/widgets.git", "token")
+	reachable, _, err := srv.probeRepositoryAccess(context.Background(), "https://github.com/octo/widgets.git", "token")
+	if err == nil {
+		t.Fatal("probeRepositoryAccess = nil error on a connection error, want err != nil")
+	}
 	if reachable {
 		t.Fatal("probeRepositoryAccess = true on a connection error, want false (fail closed for security)")
 	}

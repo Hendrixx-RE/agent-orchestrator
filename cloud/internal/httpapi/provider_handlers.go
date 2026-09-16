@@ -345,9 +345,14 @@ func (s *Server) validateSavedRepository(w http.ResponseWriter, r *http.Request)
 	}
 	defer clear(secret)
 
-	reachable, writeAccess := s.probeRepositoryAccess(r.Context(), request.RepositoryURL, string(secret))
+	reachable, writeAccess, err := s.probeRepositoryAccess(r.Context(), request.RepositoryURL, string(secret))
+	if err != nil {
+		s.logger.Error("probe repository access", "error", err, "request_id", requestID(r))
+		writeError(w, r, http.StatusBadGateway, "provider_unavailable", "GitHub is temporarily unavailable. Please try again later.")
+		return
+	}
 	if !reachable {
-		writeError(w, r, http.StatusUnprocessableEntity, "repository_unreachable", "Can't reach this repository — it may be private, or the URL may be wrong.")
+		writeError(w, r, http.StatusUnprocessableEntity, "repository_unreachable", "Can't reach this repository - it may be private, or the URL may be wrong.")
 		return
 	}
 
