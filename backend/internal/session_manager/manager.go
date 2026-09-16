@@ -2100,8 +2100,14 @@ func (m *Manager) retireWorkspaceProjectForReplacement(ctx context.Context, rec 
 
 // RestoreWithMode relaunches a torn-down session and reports whether AO used
 // native resume, a saved-prompt fallback, or a fresh launch. The fallible I/O
-// runs before any durable session write, so a failure never resurrects the row
-// or destroys the worktree (it may hold the agent's prior work).
+// runs before any durable session write, so a failure never resurrects the row.
+// If workspace restore itself fails, nothing was materialized and there is
+// nothing to undo. If workspace restore succeeds but the subsequent relaunch
+// fails, the session row is still terminated, so the newly recreated worktree
+// (which would otherwise strand the session's branch) is rolled back to the
+// pre-restore state before the error is returned; a caller with a
+// preserve-on-failure contract (reconcileLive) instead discards the returned
+// rollback and keeps the recreated worktree in place.
 func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (RestoreResult, error) {
 	if err := m.beginAgentOperation(ctx, id, agentOperationRestore); err != nil {
 		if errors.Is(err, errAgentOperationInProgress) {
@@ -2149,11 +2155,25 @@ func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (Res
 	// unresumable non-orchestrator (a worker with no task and no native id to resume).
 	// Orchestrators always relaunch fresh with the system prompt only.
 
-	ws, err := m.restoreSessionWorkspace(ctx, project, rec)
+	ws, rollback, err := m.restoreSessionWorkspace(ctx, project, rec)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("restore %s: workspace: %w", id, err)
 	}
-	return m.relaunchRestoredSession(ctx, rec, project, ws)
+	result, relaunchErr := m.relaunchRestoredSession(ctx, rec, project, ws)
+	if relaunchErr != nil {
+		// The row is still terminated (relaunch never reached MarkSpawned), but
+		// restoreSessionWorkspace has already recreated the worktree (and, for a
+		// workspace project, marked its rows active) on disk. Left behind, that
+		// materialized worktree still holds the session's branch, so a caller
+		// that falls back to a fresh spawn on this same branch (orchestrator
+		// replacement, #4641) can fail with "branch is already checked out
+		// elsewhere" while this half-restored, terminated session strands the
+		// worktree with no way back. Roll it back to the pre-restore state so
+		// the failure leaves nothing behind for the fallback to trip over.
+		rollback(context.WithoutCancel(ctx))
+		return RestoreResult{}, relaunchErr
+	}
+	return result, nil
 }
 
 func (m *Manager) relaunchRestoredSession(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo) (RestoreResult, error) {
@@ -2742,7 +2762,11 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 	if legacyScratch {
 		ws = workspaceInfo(rec)
 	} else {
-		ws, restoreErr = m.restoreSessionWorkspace(ctx, project, rec)
+		// reconcileLive deliberately keeps the recreated worktree on a relaunch
+		// failure (see the doc comment above) instead of invoking the rollback
+		// RestoreWithMode uses, so the live record's worktree and native
+		// conversation identity survive for a later Resume Agent retry.
+		ws, _, restoreErr = m.restoreSessionWorkspace(ctx, project, rec)
 	}
 	if restoreErr == nil {
 		_, relaunchErr := m.relaunchRestoredSession(ctx, rec, project, ws)
@@ -3197,7 +3221,16 @@ func (m *Manager) markSessionWorktreesActive(ctx context.Context, rows []domain.
 	return nil
 }
 
-func (m *Manager) restoreSessionWorkspace(ctx context.Context, project domain.ProjectRecord, rec domain.SessionRecord) (ports.WorkspaceInfo, error) {
+// restoreWorkspaceRollback undoes exactly what restoreSessionWorkspace
+// materialized: it force-removes any worktree(s) restoreSessionWorkspace
+// recreated on disk and restores the session_worktrees row(s) to the state
+// they were in before the call (deleting them if none existed before). It is
+// a no-op-safe best effort — failures are logged, never returned — because it
+// only ever runs after the caller has already decided to abandon the restore
+// attempt and needs to leave things as if it had never been tried.
+type restoreWorkspaceRollback func(context.Context)
+
+func (m *Manager) restoreSessionWorkspace(ctx context.Context, project domain.ProjectRecord, rec domain.SessionRecord) (ports.WorkspaceInfo, restoreWorkspaceRollback, error) {
 	if projectKindForSession(project, rec.ProjectID) != domain.ProjectKindWorkspace {
 		ws, err := m.workspace.Restore(ctx, ports.WorkspaceConfig{
 			ProjectID:     rec.ProjectID,
@@ -3210,39 +3243,64 @@ func (m *Manager) restoreSessionWorkspace(ctx context.Context, project domain.Pr
 			Path:          rec.Metadata.WorkspacePath,
 		})
 		if err != nil {
-			return ports.WorkspaceInfo{}, err
+			return ports.WorkspaceInfo{}, nil, err
 		}
 		if err := m.restoreAttachments(ctx, rec.ID, ws); err != nil {
-			return ports.WorkspaceInfo{}, fmt.Errorf("restore attachments: %w", err)
+			return ports.WorkspaceInfo{}, nil, fmt.Errorf("restore attachments: %w", err)
 		}
-		return ws, nil
+		rollback := func(rctx context.Context) {
+			if err := m.workspace.ForceDestroy(rctx, ws); err != nil {
+				m.logger.Warn("restore rollback: force destroy failed", "sessionID", rec.ID, "path", ws.Path, "error", err)
+				return
+			}
+			m.cleanupAgentWorkspace(rctx, rec, ws.Path)
+		}
+		return ws, rollback, nil
 	}
-	rows, err := m.workspaceProjectRestoreRows(ctx, project, rec)
+	// Capture the session_worktrees rows exactly as they existed before this
+	// restore mutates them, so a rollback can put them back rather than
+	// destroying preserved-ref markers a later restore attempt would need.
+	priorDBRows, err := m.store.ListSessionWorktrees(ctx, rec.ID)
 	if err != nil {
-		return ports.WorkspaceInfo{}, err
+		return ports.WorkspaceInfo{}, nil, err
+	}
+	rows, err := m.workspaceProjectRestoreRowsFromMarkers(ctx, project, rec, priorDBRows)
+	if err != nil {
+		return ports.WorkspaceInfo{}, nil, err
 	}
 	root, err := m.restoreWorkspaceProjectRows(ctx, rows)
 	if err != nil {
-		return ports.WorkspaceInfo{}, err
+		return ports.WorkspaceInfo{}, nil, err
 	}
 	for _, row := range rows {
 		if err := m.upsertWorkspaceProjectRowState(ctx, row, "active"); err != nil {
-			return ports.WorkspaceInfo{}, fmt.Errorf("mark repo %s active: %w", row.RepoName, err)
+			return ports.WorkspaceInfo{}, nil, fmt.Errorf("mark repo %s active: %w", row.RepoName, err)
 		}
 	}
 	ws := workspaceInfoFromRepoInfo(root)
 	if err := m.restoreAttachments(ctx, rec.ID, ws); err != nil {
-		return ports.WorkspaceInfo{}, fmt.Errorf("restore attachments: %w", err)
+		return ports.WorkspaceInfo{}, nil, fmt.Errorf("restore attachments: %w", err)
 	}
-	return ws, nil
-}
-
-func (m *Manager) workspaceProjectRestoreRows(ctx context.Context, project domain.ProjectRecord, rec domain.SessionRecord) ([]ports.WorkspaceRepoInfo, error) {
-	rows, err := m.store.ListSessionWorktrees(ctx, rec.ID)
-	if err != nil {
-		return nil, err
+	rollback := func(rctx context.Context) {
+		for i := len(rows) - 1; i >= 0; i-- {
+			if err := m.workspace.ForceDestroy(rctx, workspaceInfoFromRepoInfo(rows[i])); err != nil {
+				m.logger.Warn("restore rollback: force destroy failed", "sessionID", rec.ID, "repo", rows[i].RepoName, "error", err)
+			}
+		}
+		m.cleanupAgentWorkspace(rctx, rec, root.Path)
+		if len(priorDBRows) == 0 {
+			if err := m.store.DeleteSessionWorktrees(rctx, rec.ID); err != nil {
+				m.logger.Warn("restore rollback: clear worktree rows failed", "sessionID", rec.ID, "error", err)
+			}
+			return
+		}
+		for _, prior := range priorDBRows {
+			if err := m.store.UpsertSessionWorktree(rctx, prior); err != nil {
+				m.logger.Warn("restore rollback: restore worktree row failed", "sessionID", rec.ID, "repo", prior.RepoName, "error", err)
+			}
+		}
 	}
-	return m.workspaceProjectRestoreRowsFromMarkers(ctx, project, rec, rows)
+	return ws, rollback, nil
 }
 
 func (m *Manager) workspaceProjectRestoreRowsFromMarkers(ctx context.Context, project domain.ProjectRecord, rec domain.SessionRecord, rows []domain.SessionWorktreeRecord) ([]ports.WorkspaceRepoInfo, error) {

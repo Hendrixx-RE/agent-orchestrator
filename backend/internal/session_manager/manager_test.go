@@ -3629,6 +3629,86 @@ func TestRestore_RefusesLiveSession(t *testing.T) {
 		t.Fatalf("want ErrNotRestorable, got %v", err)
 	}
 }
+
+// Regression for the #4721 review finding: RestoreWithMode's workspace step
+// recreates the terminated session's worktree on disk (claiming its branch)
+// before the relaunch even starts. If relaunch then fails - agent
+// preparation, binary validation, runtime creation, or prompt delivery can
+// all fail after that point - the session row stays terminated, but the
+// freshly recreated worktree was, before this fix, left behind holding the
+// branch. A caller that falls back to a fresh spawn on that same branch (the
+// orchestrator replacement path, #4641) could then fail with "branch is
+// already checked out elsewhere" while the half-restored, terminated session
+// stranded the worktree with no way back to recovery.
+//
+// This proves RestoreWithMode itself rolls the recreated worktree back to the
+// pre-restore state on a relaunch failure, and that a subsequent fresh spawn
+// on the same branch succeeds cleanly afterward - with no stale
+// worktree/runtime left for it to trip over.
+func TestRestore_RelaunchFailureRollsBackRecreatedWorktree(t *testing.T) {
+	m, st, rt, ws := newManager()
+	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1", AgentSessionID: "agent-x"})
+	rt.createErr = errors.New("runtime create failed")
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+		t.Fatal("RestoreWithMode: want error when relaunch fails, got nil")
+	}
+	if !st.sessions["mer-1"].IsTerminated {
+		t.Fatal("session must remain terminated after a failed relaunch")
+	}
+	if ws.lastCfg.Path != "/ws/mer-1" || ws.lastCfg.Branch != "ao/mer-1" {
+		t.Fatalf("workspace restore config = %+v, want the terminated session's path/branch", ws.lastCfg)
+	}
+	wantCalls := []string{"ForceDestroy:mer-1"}
+	if got := ws.calls; strings.Join(got, ",") != strings.Join(wantCalls, ",") {
+		t.Fatalf("workspace calls = %v, want %v (restore must be rolled back)", got, wantCalls)
+	}
+	if rt.created != 0 {
+		t.Fatalf("runtime.Create succeeded calls = %d, want 0 (create itself failed)", rt.created)
+	}
+
+	// The fallback a caller like SpawnOrchestrator takes after a failed resume:
+	// a fresh spawn claiming the same branch. It must succeed with no stale
+	// worktree/runtime left behind by the rolled-back restore attempt.
+	rt.createErr = nil
+	rec, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindOrchestrator, Branch: "ao/mer-1"})
+	if err != nil {
+		t.Fatalf("fresh spawn after rolled-back restore failure: %v", err)
+	}
+	if rec.IsTerminated {
+		t.Fatal("fresh spawn after rollback should produce a live session")
+	}
+	if rt.created != 1 {
+		t.Fatalf("runtime.Create calls after fresh spawn = %d, want 1", rt.created)
+	}
+}
+
+// Same regression, but for a workspace project: RestoreWithMode's rollback
+// must force-destroy every recreated repo worktree (not just the root) and
+// restore the session_worktrees rows to their pre-restore state so a later
+// restore attempt is not confused by rows this failed attempt half-wrote.
+func TestRestore_RelaunchFailureRollsBackWorkspaceProjectWorktrees(t *testing.T) {
+	m, st, rt, ws := newManager()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: "/repo/mer", Kind: domain.ProjectKindWorkspace, Config: testRoleAgents()}
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "services/api"}}
+	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1", AgentSessionID: "agent-x"})
+	rt.createErr = errors.New("runtime create failed")
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+		t.Fatal("RestoreWithMode: want error when relaunch fails, got nil")
+	}
+	wantCalls := []string{"Restore:__root__", "Restore:api", "ForceDestroy:api", "ForceDestroy:__root__"}
+	if got := ws.calls; strings.Join(got, ",") != strings.Join(wantCalls, ",") {
+		t.Fatalf("workspace calls = %v, want %v (every recreated repo must be rolled back, in reverse order)", got, wantCalls)
+	}
+	rows, err := st.ListSessionWorktrees(ctx, "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("session_worktrees rows after rollback = %v, want none (no rows existed before this restore attempt)", rows)
+	}
+}
 func TestCleanup_ReclaimsTerminalWorkspaces(t *testing.T) {
 	m, st, _, ws := newManager()
 	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})
