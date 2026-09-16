@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/cloud/internal/worker"
-	"strings"
 	"runtime"
+	"strings"
 )
 
 func TestBuildInteractiveRestoresClaudeConversationFromDurableConfig(t *testing.T) {
