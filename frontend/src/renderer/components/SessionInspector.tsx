@@ -1239,13 +1239,7 @@ function PRSummaryCard({
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const presentation = prCardPresentation(pr);
-	const canMerge =
-		!isCloud &&
-		pr.state === "open" &&
-		pr.ci.state === "passing" &&
-		pr.review.decision === "approved" &&
-		pr.mergeability.state === "mergeable" &&
-		Boolean(pr.url && pr.headSha);
+	const canMerge = !isCloud && prCanMerge(pr) && Boolean(pr.url && pr.headSha);
 	const mergePr = useMutation({
 		mutationFn: async () => {
 			if (usePreviewData) return;
