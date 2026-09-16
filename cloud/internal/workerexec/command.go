@@ -465,11 +465,25 @@ func (b HarnessBuilder) configureCodexCredential(
 	}
 	if credential.CredentialType == "auth_json" {
 		path := filepath.Join(home, "auth.json")
-		if err := os.WriteFile(path, []byte(credential.Secret), 0o600); err != nil {
-			return fmt.Errorf("write Codex authentication: %w", err)
+		tmp, err := os.CreateTemp(home, ".ao-codex-auth-*")
+		if err != nil {
+			return fmt.Errorf("create temporary Codex authentication: %w", err)
 		}
-		if err := os.Chmod(path, 0o600); err != nil {
-			return fmt.Errorf("secure Codex authentication: %w", err)
+		tmpPath := tmp.Name()
+		defer func() { _ = os.Remove(tmpPath) }()
+		if err := tmp.Chmod(0o600); err != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("secure temporary Codex authentication: %w", err)
+		}
+		if _, err := tmp.Write([]byte(credential.Secret)); err != nil {
+			_ = tmp.Close()
+			return fmt.Errorf("write temporary Codex authentication: %w", err)
+		}
+		if err := tmp.Close(); err != nil {
+			return fmt.Errorf("close temporary Codex authentication: %w", err)
+		}
+		if err := os.Rename(tmpPath, path); err != nil {
+			return fmt.Errorf("replace Codex authentication: %w", err)
 		}
 		command.Env["CODEX_HOME"] = home
 		return nil
@@ -509,7 +523,11 @@ func loginCodex(binary, home, credentialType, secret string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, binary, "login", option)
-	command.Env = append(os.Environ(), "CODEX_HOME="+home)
+	command.Env = []string{
+		"CODEX_HOME=" + home,
+		"HOME=" + os.Getenv("HOME"),
+		"PATH=" + os.Getenv("PATH"),
+	}
 	command.Stdin = strings.NewReader(secret)
 	if err := command.Run(); err != nil {
 		return err

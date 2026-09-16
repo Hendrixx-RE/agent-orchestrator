@@ -44,6 +44,8 @@ let notifyRenderersFn: ((session: CloudAccount | null) => void) | null = null;
 // At most one loopback callback server is armed at a time.
 let loopbackServer: Server | null = null;
 
+let activeProviderAuthAbort: AbortController | null = null;
+
 export interface StoredSession extends CloudAccount {
   accessToken: string;
   // WorkOS sessions carry a rotating refresh token; local (opaque-token)
@@ -616,6 +618,12 @@ export function installCloudIPC(
     await signOutCloud(dataDir);
     notifyRenderers(null);
   });
+  ipcMain.handle("cloud:cancelProviderAuth", async () => {
+    if (activeProviderAuthAbort) {
+      activeProviderAuthAbort.abort();
+      activeProviderAuthAbort = null;
+    }
+  });
   ipcMain.handle("cloud:connectProviderAuth", async (_event, input: unknown) => {
     if (typeof input !== "object" || input === null) throw new Error("Invalid Cloud provider login request.");
     const { baseUrl, orgId, provider } = input as Record<string, unknown>;
@@ -631,7 +639,16 @@ export function installCloudIPC(
     const dataDir = getDataDir();
     const token = await getCloudAccessToken(dataDir);
     if (!token) throw new Error("Sign in to AO Cloud before connecting a provider.");
-    const credential = await providerAuthFlow(provider).authenticate(dataDir);
+    
+    if (activeProviderAuthAbort) activeProviderAuthAbort.abort();
+    activeProviderAuthAbort = new AbortController();
+    let credential;
+    try {
+      credential = await providerAuthFlow(provider).authenticate(dataDir, activeProviderAuthAbort.signal);
+    } finally {
+      activeProviderAuthAbort = null;
+    }
+
     if (credential.provider !== provider) throw new Error("Cloud provider login returned an unexpected provider.");
     const basePath = base.pathname.replace(/\/+$/, "");
     const target = new URL(`${base.origin}${basePath}/api/cloud/v1/orgs/${encodeURIComponent(orgId)}/provider-connections/agents/${encodeURIComponent(credential.provider)}`);

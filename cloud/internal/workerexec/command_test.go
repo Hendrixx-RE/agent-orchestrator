@@ -8,6 +8,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/cloud/internal/worker"
 	"strings"
+	"runtime"
 )
 
 func TestBuildInteractiveRestoresClaudeConversationFromDurableConfig(t *testing.T) {
@@ -94,8 +95,12 @@ func TestBuildInteractiveWritesOpaqueCodexAuthJSONWithoutRelogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("auth.json permissions = %#o, want 0600", info.Mode().Perm())
+	expectedPerm := os.FileMode(0o600)
+	if runtime.GOOS == "windows" {
+		expectedPerm = 0o666
+	}
+	if info.Mode().Perm() != expectedPerm {
+		t.Errorf("auth.json permissions = %#o, want %#o", info.Mode().Perm(), expectedPerm)
 	}
 }
 
@@ -155,7 +160,7 @@ func TestBuildInteractiveOrchestratorPrompt(t *testing.T) {
 		"ao spawn --name",
 		"ao list",
 		"ao kill",
-		"skills/using-ao/SKILL.md",
+		"using-ao/SKILL.md",
 		"coordination-only",
 	} {
 		if !strings.Contains(prompt, needle) {
@@ -185,7 +190,7 @@ func TestBuildInteractiveWorkerPromptWithParent(t *testing.T) {
 		"$AO_PULL_REQUEST_HELP",
 		"$AO_SESSION_BRANCH",
 		"ao claim-pr",
-		"skills/using-ao/SKILL.md",
+		"using-ao/SKILL.md",
 	} {
 		if !strings.Contains(prompt, needle) {
 			t.Fatalf("worker prompt missing %q", needle)
