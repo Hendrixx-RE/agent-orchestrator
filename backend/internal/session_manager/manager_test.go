@@ -29,14 +29,14 @@ import (
 var ctx = context.Background()
 
 type fakeStore struct {
-	sessions         map[domain.SessionID]domain.SessionRecord
-	pr               map[domain.SessionID]domain.PRFacts
-	projects         map[string]domain.ProjectRecord
-	conversations    map[domain.SessionID]domain.ConversationRecord
-	workspaceRepo    map[string][]domain.WorkspaceRepoRecord
-	num              int
-	deleteErr        error
-	upsertWTErr      error
+	sessions      map[domain.SessionID]domain.SessionRecord
+	pr            map[domain.SessionID]domain.PRFacts
+	projects      map[string]domain.ProjectRecord
+	conversations map[domain.SessionID]domain.ConversationRecord
+	workspaceRepo map[string][]domain.WorkspaceRepoRecord
+	num           int
+	deleteErr     error
+	upsertWTErr   error
 	// upsertWTFailRepo, when set, fails UpsertSessionWorktree only for the
 	// matching repo name, so a test can exercise a mid-loop row-activation
 	// failure without also blocking the rollback's own writes afterward.
