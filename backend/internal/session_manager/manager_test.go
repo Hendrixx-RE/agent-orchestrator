@@ -37,6 +37,10 @@ type fakeStore struct {
 	num              int
 	deleteErr        error
 	upsertWTErr      error
+	// upsertWTFailRepo, when set, fails UpsertSessionWorktree only for the
+	// matching repo name, so a test can exercise a mid-loop row-activation
+	// failure without also blocking the rollback's own writes afterward.
+	upsertWTFailRepo string
 	listAllErr       error
 	getProjectErr    error
 	getSessionErr    error
@@ -173,6 +177,9 @@ func (f *fakeStore) GetDisplayPRFactsForSession(_ context.Context, id domain.Ses
 func (f *fakeStore) UpsertSessionWorktree(_ context.Context, row domain.SessionWorktreeRecord) error {
 	if f.upsertWTErr != nil {
 		return f.upsertWTErr
+	}
+	if f.upsertWTFailRepo != "" && row.RepoName == f.upsertWTFailRepo {
+		return fmt.Errorf("upsert worktree row %s: simulated failure", row.RepoName)
 	}
 	if f.sharedLog != nil {
 		*f.sharedLog = append(*f.sharedLog, "UpsertSessionWorktree:"+string(row.SessionID))
@@ -884,6 +891,11 @@ type fakeWorkspace struct {
 	createErr  error
 	destroyErr error
 	destroyed  int
+	// restoreFailRepo, when set, makes Restore fail with restoreFailErr for the
+	// multi-repo call whose repo name matches, so a test can exercise a
+	// partial-restore failure after earlier repos already succeeded.
+	restoreFailRepo string
+	restoreFailErr  error
 	// destroyReclaim, when set, is the reclaim outcome DestroyReclaim reports.
 	destroyReclaim ports.WorkspaceReclaim
 	// destroyReclaimByPath overrides destroyReclaim for one workspace path, so a
@@ -1076,11 +1088,16 @@ func (w *fakeWorkspace) Restore(ctx context.Context, cfg ports.WorkspaceConfig) 
 	w.lastCfg = cfg
 	w.restoreConfigs = append(w.restoreConfigs, cfg)
 	if cfg.RepoPath != "" {
-		entry := "Restore:" + fakeWorkspaceRepoName(ports.WorkspaceInfo{
+		repoName := fakeWorkspaceRepoName(ports.WorkspaceInfo{
 			Path:      cfg.Path,
 			SessionID: cfg.SessionID,
 			RepoPath:  cfg.RepoPath,
 		})
+		if w.restoreFailRepo != "" && repoName == w.restoreFailRepo {
+			w.calls = append(w.calls, "Restore:"+repoName+":fail")
+			return ports.WorkspaceInfo{}, w.restoreFailErr
+		}
+		entry := "Restore:" + repoName
 		w.calls = append(w.calls, entry)
 		return ports.WorkspaceInfo{Path: cfg.Path, Branch: cfg.Branch, BaseRef: cfg.BaseRef, SessionID: cfg.SessionID, ProjectID: cfg.ProjectID, RepoPath: cfg.RepoPath}, nil
 	}
@@ -3709,6 +3726,70 @@ func TestRestore_RelaunchFailureRollsBackWorkspaceProjectWorktrees(t *testing.T)
 		t.Fatalf("session_worktrees rows after rollback = %v, want none (no rows existed before this restore attempt)", rows)
 	}
 }
+
+// Regression for the #4721 review finding: a repo failing mid-loop inside
+// restoreWorkspaceProjectRows must not strand the repos that already
+// succeeded earlier in the same call. Here "api" is the second repo restored
+// after the root already landed on disk; when "api" fails, the root must be
+// force-destroyed too, and RestoreWithMode must report the error with
+// nothing left behind for a fallback spawn to collide with.
+func TestRestore_PartialWorkspaceProjectRestoreRollsBackEarlierRepos(t *testing.T) {
+	m, st, _, ws := newManager()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: "/repo/mer", Kind: domain.ProjectKindWorkspace, Config: testRoleAgents()}
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "services/api"}}
+	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1", AgentSessionID: "agent-x"})
+	ws.restoreFailRepo = "api"
+	ws.restoreFailErr = errors.New("repo restore failed")
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+		t.Fatal("RestoreWithMode: want error when a repo fails mid-restore, got nil")
+	}
+	wantCalls := []string{"Restore:__root__", "Restore:api:fail", "ForceDestroy:__root__"}
+	if got := ws.calls; strings.Join(got, ",") != strings.Join(wantCalls, ",") {
+		t.Fatalf("workspace calls = %v, want %v (the already-restored root must be rolled back too)", got, wantCalls)
+	}
+	rows, err := st.ListSessionWorktrees(ctx, "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("session_worktrees rows after partial-restore rollback = %v, want none", rows)
+	}
+}
+
+// Regression for the #4721 review finding: a failure in the row-activation
+// loop *after* every repo worktree was already fully restored on disk must
+// still force-destroy every recreated repo (not just report the DB error),
+// and must not leave a newly-activated row (for a repo that did not exist in
+// the prior session_worktrees state at all) behind for a later restore
+// attempt to trip over.
+func TestRestore_RowActivationFailureRollsBackFullyRestoredRepos(t *testing.T) {
+	m, st, _, ws := newManager()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Path: "/repo/mer", Kind: domain.ProjectKindWorkspace, Config: testRoleAgents()}
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "services/api"}}
+	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1", AgentSessionID: "agent-x"})
+	// No prior session_worktrees rows exist for mer-1 (a retired orchestrator
+	// never writes one): "api" activating is entirely new state this restore
+	// attempt introduces, so a correct rollback must remove it, not merely
+	// leave it "active" because there was never a "prior" api row to restore.
+	st.upsertWTFailRepo = "api"
+
+	if _, err := m.RestoreWithMode(ctx, "mer-1"); err == nil {
+		t.Fatal("RestoreWithMode: want error when row activation fails, got nil")
+	}
+	wantCalls := []string{"Restore:__root__", "Restore:api", "ForceDestroy:api", "ForceDestroy:__root__"}
+	if got := ws.calls; strings.Join(got, ",") != strings.Join(wantCalls, ",") {
+		t.Fatalf("workspace calls = %v, want %v (both fully-restored repos must be rolled back)", got, wantCalls)
+	}
+	rows, err := st.ListSessionWorktrees(ctx, "mer-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("session_worktrees rows after activation-failure rollback = %v, want none (no rows existed before this restore attempt, so none - including the new api row - must remain)", rows)
+	}
+}
+
 func TestCleanup_ReclaimsTerminalWorkspaces(t *testing.T) {
 	m, st, _, ws := newManager()
 	seedTerminal(st, "mer-1", domain.SessionMetadata{WorkspacePath: "/ws/mer-1"})

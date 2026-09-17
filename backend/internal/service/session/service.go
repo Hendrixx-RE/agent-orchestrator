@@ -504,7 +504,19 @@ func (s *Service) SpawnOrchestrator(
 		// Try to resume that conversation in place before falling back to a
 		// cold, unlinked respawn (#4641).
 		if resumeCandidate != "" {
-			if sess, ok := s.resumeRetiredOrchestrator(ctx, project, resumeCandidate); ok {
+			sess, ok, resumeErr := s.resumeRetiredOrchestrator(ctx, project, resumeCandidate)
+			if resumeErr != nil {
+				// The resumed session could not be confirmed dead: it either
+				// failed read back or replacement verification, and the retirement
+				// meant to clean it up afterward also failed. It may still be a
+				// live coordinator holding the canonical branch. Neither returning
+				// it (it already failed verification) nor falling through to a
+				// cold spawn (which could collide with that branch, or simply run
+				// two live orchestrators side by side) is safe, so abort instead of
+				// silently doubling the coordinator (#4721).
+				return domain.Session{}, toAPIError(resumeErr)
+			}
+			if ok {
 				return sess, nil
 			}
 			coldStart = true
@@ -554,34 +566,40 @@ func (s *Service) SpawnOrchestrator(
 // spawn without leaking a half-restored session. If failure occurs after
 // RestoreWithMode has already relaunched the runtime, it retires that
 // just-resumed runtime so the fallback spawn starts from a clean slate.
-func (s *Service) resumeRetiredOrchestrator(ctx context.Context, project domain.ProjectRecord, id domain.SessionID) (domain.Session, bool) {
+//
+// A non-nil error return means that cleanup retirement itself failed: the
+// resumed session may still be live, so the caller must not treat this the
+// same as an ordinary ok=false (safe to cold-spawn) - it must abort instead,
+// or risk running two live orchestrators side by side, one of them still
+// holding the canonical branch a cold spawn would also need (#4721).
+func (s *Service) resumeRetiredOrchestrator(ctx context.Context, project domain.ProjectRecord, id domain.SessionID) (domain.Session, bool, error) {
 	res, err := s.manager.RestoreWithMode(ctx, id)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("orchestrator resume failed; respawning cold", "sessionID", id, "error", err)
 		}
-		return domain.Session{}, false
+		return domain.Session{}, false, nil
 	}
 	sess, err := s.toSession(ctx, res.Session)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("orchestrator resume: read back resumed session failed; respawning cold", "sessionID", id, "error", err)
 		}
-		if retErr := s.manager.RetireForReplacement(ctx, id); retErr != nil && s.logger != nil {
-			s.logger.Warn("orchestrator resume: failed to retire resumed session after read back error", "sessionID", id, "error", retErr)
+		if retErr := s.manager.RetireForReplacement(ctx, id); retErr != nil {
+			return domain.Session{}, false, fmt.Errorf("orchestrator resume: resumed session %s could not be retired after read back failure: %w", id, retErr)
 		}
-		return domain.Session{}, false
+		return domain.Session{}, false, nil
 	}
 	if err := s.verifyOrchestratorReplacement(project, sess); err != nil {
 		if s.logger != nil {
 			s.logger.Warn("orchestrator resume: resumed session failed replacement verification; respawning cold", "sessionID", id, "error", err)
 		}
-		if retErr := s.manager.RetireForReplacement(ctx, id); retErr != nil && s.logger != nil {
-			s.logger.Warn("orchestrator resume: failed to retire resumed session after verification failure", "sessionID", id, "error", retErr)
+		if retErr := s.manager.RetireForReplacement(ctx, id); retErr != nil {
+			return domain.Session{}, false, fmt.Errorf("orchestrator resume: resumed session %s could not be retired after verification failure: %w", id, retErr)
 		}
-		return domain.Session{}, false
+		return domain.Session{}, false, nil
 	}
-	return sess, true
+	return sess, true, nil
 }
 
 func (s *Service) activeOrchestrators(ctx context.Context, projectID domain.ProjectID) ([]domain.Session, error) {

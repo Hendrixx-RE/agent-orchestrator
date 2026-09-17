@@ -3270,28 +3270,35 @@ func (m *Manager) restoreSessionWorkspace(ctx context.Context, project domain.Pr
 	}
 	root, err := m.restoreWorkspaceProjectRows(ctx, rows)
 	if err != nil {
+		// restoreWorkspaceProjectRows has already force-destroyed whatever it
+		// partially restored on disk before returning this error (a repo can
+		// fail mid-loop, after earlier repos in the same call already landed),
+		// so there is nothing left here to roll back.
 		return ports.WorkspaceInfo{}, nil, err
 	}
-	for _, row := range rows {
-		if err := m.upsertWorkspaceProjectRowState(ctx, row, "active"); err != nil {
-			return ports.WorkspaceInfo{}, nil, fmt.Errorf("mark repo %s active: %w", row.RepoName, err)
-		}
-	}
-	ws := workspaceInfoFromRepoInfo(root)
-	if err := m.restoreAttachments(ctx, rec.ID, ws); err != nil {
-		return ports.WorkspaceInfo{}, nil, fmt.Errorf("restore attachments: %w", err)
-	}
-	rollback := func(rctx context.Context) {
+	// From here on every repo in rows is materialized on disk. A failure in
+	// either step below must undo that before returning - not just report the
+	// error with a nil rollback - or a caller relying on "an error here means
+	// nothing was left behind" (RestoreWithMode's cold-fallback path, #4721)
+	// would strand the whole workspace project's branches.
+	undoRestoredRepos := func(rctx context.Context) {
 		for i := len(rows) - 1; i >= 0; i-- {
 			if err := m.workspace.ForceDestroy(rctx, workspaceInfoFromRepoInfo(rows[i])); err != nil {
 				m.logger.Warn("restore rollback: force destroy failed", "sessionID", rec.ID, "repo", rows[i].RepoName, "error", err)
 			}
 		}
 		m.cleanupAgentWorkspace(rctx, rec, root.Path)
-		if len(priorDBRows) == 0 {
-			if err := m.store.DeleteSessionWorktrees(rctx, rec.ID); err != nil {
-				m.logger.Warn("restore rollback: clear worktree rows failed", "sessionID", rec.ID, "error", err)
-			}
+	}
+	// Delete-then-reinsert rather than re-upserting priorDBRows in place: this
+	// restore attempt may have activated rows for repos that did not exist in
+	// priorDBRows at all (e.g. a repo added to the workspace project's
+	// registry since the last preserved state). Re-upserting only the prior
+	// rows would leave that new row's stale "active" marker behind for a later
+	// restore attempt to trip over; deleting everything first guarantees the
+	// table ends up holding exactly priorDBRows, no more and no less.
+	restorePriorRows := func(rctx context.Context) {
+		if err := m.store.DeleteSessionWorktrees(rctx, rec.ID); err != nil {
+			m.logger.Warn("restore rollback: clear worktree rows failed", "sessionID", rec.ID, "error", err)
 			return
 		}
 		for _, prior := range priorDBRows {
@@ -3299,6 +3306,23 @@ func (m *Manager) restoreSessionWorkspace(ctx context.Context, project domain.Pr
 				m.logger.Warn("restore rollback: restore worktree row failed", "sessionID", rec.ID, "repo", prior.RepoName, "error", err)
 			}
 		}
+	}
+	for _, row := range rows {
+		if err := m.upsertWorkspaceProjectRowState(ctx, row, "active"); err != nil {
+			undoRestoredRepos(ctx)
+			restorePriorRows(ctx)
+			return ports.WorkspaceInfo{}, nil, fmt.Errorf("mark repo %s active: %w", row.RepoName, err)
+		}
+	}
+	ws := workspaceInfoFromRepoInfo(root)
+	if err := m.restoreAttachments(ctx, rec.ID, ws); err != nil {
+		undoRestoredRepos(ctx)
+		restorePriorRows(ctx)
+		return ports.WorkspaceInfo{}, nil, fmt.Errorf("restore attachments: %w", err)
+	}
+	rollback := func(rctx context.Context) {
+		undoRestoredRepos(rctx)
+		restorePriorRows(rctx)
 	}
 	return ws, rollback, nil
 }
@@ -3498,10 +3522,26 @@ func (m *Manager) upsertWorkspaceProjectRowState(ctx context.Context, row ports.
 	})
 }
 
+// restoreWorkspaceProjectRows recreates every repo worktree in rows and
+// returns the root row. It is atomic from the caller's point of view: on any
+// failure - a repo mid-loop, or a missing root row after every repo
+// otherwise succeeded - it force-destroys whatever it already restored on
+// disk in this call before returning the error, so a caller never has to
+// distinguish "nothing was materialized" from "some repos were, and are now
+// stranded" (#4721).
 func (m *Manager) restoreWorkspaceProjectRows(ctx context.Context, rows []ports.WorkspaceRepoInfo) (ports.WorkspaceRepoInfo, error) {
 	var root ports.WorkspaceRepoInfo
+	restored := make([]ports.WorkspaceRepoInfo, 0, len(rows))
+	undoRestored := func() {
+		for i := len(restored) - 1; i >= 0; i-- {
+			if destroyErr := m.workspace.ForceDestroy(ctx, workspaceInfoFromRepoInfo(restored[i])); destroyErr != nil {
+				m.logger.Warn("restore workspace project: rollback of partially restored repo failed",
+					"repo", restored[i].RepoName, "path", restored[i].Path, "error", destroyErr)
+			}
+		}
+	}
 	for _, row := range rows {
-		restored, err := m.workspace.Restore(ctx, ports.WorkspaceConfig{
+		restoredInfo, err := m.workspace.Restore(ctx, ports.WorkspaceConfig{
 			ProjectID: row.ProjectID,
 			SessionID: row.SessionID,
 			Branch:    row.Branch,
@@ -3510,16 +3550,19 @@ func (m *Manager) restoreWorkspaceProjectRows(ctx context.Context, rows []ports.
 			Path:      row.Path,
 		})
 		if err != nil {
+			undoRestored()
 			return ports.WorkspaceRepoInfo{}, fmt.Errorf("repo %s: %w", row.RepoName, err)
 		}
-		row.Path = restored.Path
-		row.Branch = restored.Branch
-		row.BaseRef = firstNonEmptyString(restored.BaseRef, row.BaseRef)
+		row.Path = restoredInfo.Path
+		row.Branch = restoredInfo.Branch
+		row.BaseRef = firstNonEmptyString(restoredInfo.BaseRef, row.BaseRef)
+		restored = append(restored, row)
 		if row.RepoName == domain.RootWorkspaceRepoName {
 			root = row
 		}
 	}
 	if root.Path == "" {
+		undoRestored()
 		return ports.WorkspaceRepoInfo{}, errors.New("workspace project root worktree row missing")
 	}
 	return root, nil

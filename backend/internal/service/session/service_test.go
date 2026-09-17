@@ -2357,6 +2357,10 @@ type fakeCommander struct {
 	cleanupProjects []domain.ProjectID
 	killErr         error
 	retireErr       error
+	// retireErrOnCall, when nonzero, fails only the Nth RetireForReplacement
+	// call (1-indexed) instead of every call, so a test can let the initial
+	// pre-resume retirement succeed and only the post-resume cleanup fail.
+	retireErrOnCall int
 	sendErr         error
 	sendFunc        func(domain.SessionID, string) error
 	cleanupErr      error
@@ -2440,6 +2444,9 @@ func (f *fakeCommander) Kill(_ context.Context, id domain.SessionID) (bool, erro
 	return true, nil
 }
 func (f *fakeCommander) RetireForReplacement(_ context.Context, id domain.SessionID) error {
+	if f.retireErrOnCall != 0 && len(f.retired)+1 == f.retireErrOnCall {
+		return fmt.Errorf("simulated retire failure on call %d", f.retireErrOnCall)
+	}
 	if f.retireErr != nil {
 		return f.retireErr
 	}
@@ -2790,6 +2797,40 @@ func TestSpawnOrchestratorCleanRetiresResumedSessionOnVerificationFailure(t *tes
 	}
 	if len(fc.ready) != 1 || fc.ready[0] != "mer-9" {
 		t.Fatalf("ready = %v, want the cold-start notice to wait for the new session to be ready", fc.ready)
+	}
+}
+
+// Regression for the #4721 review finding: if RestoreWithMode succeeds but
+// then fails read-back or replacement verification, and the cleanup retire of
+// that just-resumed session *also* fails, SpawnOrchestrator must not proceed
+// to a cold fallback spawn - the resumed session may still be live, and a
+// fresh spawn could either collide with its still-held branch or simply run
+// two live orchestrators side by side. It must abort and surface the error.
+func TestSpawnOrchestratorCleanAbortsWhenPostResumeRetireFails(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator}
+	st.listPRFactsErr["mer-1"] = errors.New("database read error") // forces read-back failure
+	fc := &fakeCommander{
+		restoreResult: sessionmanager.RestoreResult{
+			Session: domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator},
+		},
+		// The 1st RetireForReplacement call (initial pre-resume teardown) must
+		// succeed so resume is even attempted; the 2nd (post-read-back-failure
+		// cleanup) is the one that fails.
+		retireErrOnCall: 2,
+	}
+	svc := &Service{manager: fc, store: st}
+
+	got, err := svc.SpawnOrchestrator(context.Background(), "mer", true, "")
+	if err == nil {
+		t.Fatalf("SpawnOrchestrator: want error when post-resume retire fails, got session %+v", got)
+	}
+	if fc.spawned {
+		t.Fatal("cold fallback spawn must not run when the resumed session could not be confirmed retired")
+	}
+	if len(fc.retired) != 1 || fc.retired[0] != "mer-1" {
+		t.Fatalf("retired = %v, want exactly [mer-1] (only the initial pre-resume retirement)", fc.retired)
 	}
 }
 
